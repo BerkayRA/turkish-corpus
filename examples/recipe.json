@@ -1,0 +1,45 @@
+{
+  "output_root": "output/corpus",
+  "target_tokens": "20e9",
+  "tokenizer": null,
+  "tasks": 8,
+  "shuffle_seed": 0,
+  "sources": [
+    {
+      "name": "hplt",
+      "kind": "hplt",
+      "weight": 0.60,
+      "license": "CC0",
+      "register": "web",
+      "language": "tur_Latn",
+      "limit": -1
+    },
+    {
+      "name": "academic",
+      "kind": "academic",
+      "weight": 0.18,
+      "license": "research",
+      "register": "academic",
+      "source": "dergipark",
+      "pdf_dir": "downloads/dergipark",
+      "limit": -1
+    },
+    {
+      "name": "wikipedia",
+      "kind": "wikipedia",
+      "weight": 0.12,
+      "license": "CC BY-SA 3.0/4.0",
+      "register": "encyclopedic",
+      "dump": "20231101.tr",
+      "limit": -1
+    },
+    {
+      "name": "mevzuat",
+      "kind": "mevzuat",
+      "weight": 0.10,
+      "license": "public (official text)",
+      "register": "legal",
+      "limit": -1
+    }
+  ]
+}

@@ -18,6 +18,7 @@ provided for cluster scale.
 
 from __future__ import annotations
 
+import logging
 import os
 
 from .config import PipelineConfig
@@ -27,6 +28,23 @@ __all__ = [
     "run_local",
     "run_slurm",
 ]
+
+logger = logging.getLogger(__name__)
+
+
+def _lid_compatible() -> bool:
+    """Whether datatrove's fasttext LanguageFilter can run in this environment.
+
+    ``fasttext-wheel`` 0.9.2 calls ``np.array(probs, copy=False)`` in ``predict``, which
+    raises ``ValueError`` under NumPy >= 2. Rather than hard-pin numpy (a transitive dep
+    requires >= 2), we detect the incompatibility and let the caller skip the optional LID
+    gate with a warning. Returns True when numpy < 2 (fasttext works) or numpy is absent.
+    """
+    try:
+        import numpy  # noqa: PLC0415
+    except ImportError:  # pragma: no cover - numpy is always present with the pipeline extra
+        return True
+    return int(numpy.__version__.split(".")[0]) < 2
 
 
 def _require_datatrove():
@@ -79,12 +97,21 @@ def build_process_pipeline(config: PipelineConfig) -> list:
     steps: list = [_make_reader(config)]
 
     if config.language.enabled:
-        steps.append(
-            LanguageFilter(
-                languages=list(config.language.languages),
-                language_threshold=config.language.threshold,
+        if _lid_compatible():
+            steps.append(
+                LanguageFilter(
+                    languages=list(config.language.languages),
+                    language_threshold=config.language.threshold,
+                )
             )
-        )
+        else:
+            logger.warning(
+                "LanguageFilter requested but skipped: fasttext-wheel's LID is incompatible "
+                "with NumPy>=2 (np.array(copy=False) raises). Pin numpy<2 in an isolated env "
+                "or install a NumPy-2-compatible fasttext to enable the secondary tr gate. "
+                "HPLT is already tur_Latn-tagged and the source ingesters emit Turkish, so "
+                "this gate is a contamination backstop, not primary routing."
+            )
 
     steps += [
         GopherRepetitionFilter(),

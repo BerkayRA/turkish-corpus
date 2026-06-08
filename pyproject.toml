@@ -45,6 +45,7 @@ crawl = ["duckdb>=1.1", "trafilatura>=1.8,<1.12", "scrapy>=2.13", "warcio>=1.7",
 
 [project.scripts]
 tc-run-hplt = "turkish_corpus.cli:main"
+tc-build-corpus = "turkish_corpus.orchestrate:main"
 
 [dependency-groups]
 dev = [

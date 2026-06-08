@@ -36,6 +36,12 @@ a token budget, and a manifest.
 (verify URL patterns live). Courts (Yargıtay/Danıştay) and YÖKTEZ downloaders remain
 scaffolds — JS/CAPTCHA-gated, need Playwright.
 
+**One-command orchestration ✅** ([`end-to-end.md`](end-to-end.md)): `tc-build-corpus
+--recipe <file>` runs ingest → clean → blend for all sources and writes
+`corpus_manifest.json` (idempotent; `--force` to redo). Verified end-to-end on real
+clean+blend. Note: datatrove's fasttext LID is NumPy-2-incompatible, so the optional
+language gate degrades to a logged skip (pin numpy<2 to enable).
+
 **Remaining within this step:** verify the gov-portal URL patterns on a live run, add the
 Playwright-based court/YÖKTEZ downloaders (+ optional OCR for scanned theses), and run the
 real ingest→clean→blend at scale.

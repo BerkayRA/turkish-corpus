@@ -43,6 +43,17 @@ uv sync --extra crawl         # + duckdb/trafilatura (crawler tool, roadmap step
 
 ## Quickstart
 
+**Whole corpus in one command** — ingest → clean → blend from a recipe (see
+[`docs/end-to-end.md`](docs/end-to-end.md)):
+
+```bash
+uv run --extra pipeline --extra sources --extra academic \
+    tc-build-corpus --recipe examples/recipe.json
+# → output/corpus/{raw,clean,blend}/ + corpus_manifest.json (per-source token accounting)
+```
+
+Or drive the stages individually:
+
 ```bash
 # Validate the pipeline config without running (no heavy deps needed):
 uv run tc-run-hplt --limit 2000 --output ./output/dev --dry-run
@@ -86,7 +97,8 @@ Pure, dependency-free Turkish logic (`normalization`, `pii`, `tokenizer`, `filte
 `config`, `fertility`, `crawl.cc_index`, `crawl.seeds`) is unit-tested on any machine; the
 heavy integrations (`blocks`, `pipeline`, `morphology`, `crawl.spider`/`pipelines`) are
 imported on demand and exercised under the `pipeline`/`sentencepiece`/`crawl` extras. Full
-diagram in [`docs/architecture.md`](docs/architecture.md); pipeline stages in
+diagram in [`docs/architecture.md`](docs/architecture.md); the one-command orchestrator in
+[`docs/end-to-end.md`](docs/end-to-end.md); pipeline stages in
 [`docs/pipeline.md`](docs/pipeline.md); tokenizers in [`docs/tokenizer.md`](docs/tokenizer.md);
 sources in [`docs/sources.md`](docs/sources.md); the blend in [`docs/blend.md`](docs/blend.md);
 data acquisition (downloaders/scrapers) in [`docs/acquisition.md`](docs/acquisition.md);
