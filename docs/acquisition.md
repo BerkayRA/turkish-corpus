@@ -22,12 +22,16 @@ politeness). It provides:
 
 Timing/backoff are pure and unit-tested with injected `sleep`/`clock`; `requests` is lazy.
 
-## DergiPark (academic) — `sources/dergipark.py` ✅
+## DergiPark (academic) — `sources/dergipark.py` ✅ (live-verified 2026-06-08)
 
-Harvests via **OAI-PMH** (`https://dergipark.org.tr/api/public/oai/` — verify live), the
-sanctioned, structured harvest channel, paging through `resumptionToken`. Extracts per-article
-PDF URLs from Dublin Core identifiers, downloads PDFs (filename-sanitized, Turkish-preferred)
-to a directory, then the [academic ingester](sources.md) extracts text.
+Harvests via **OAI-PMH** (`https://dergipark.org.tr/api/public/oai/`), the sanctioned,
+structured harvest channel, paging through `resumptionToken`. **Verified live:** the OAI
+`dc:identifier` is the article *landing* URL (e.g. `.../pub/mulkiye/article/10`), **not** a
+PDF, so the downloader resolves the PDF in a second step — fetch the article page and extract
+its `/<lang>/download/article-file/<id>` link (excluding `article-cite-file` citation links),
+then download. PDFs are filename-sanitized, Turkish-preferred (via `dc:language`), SSRF-guarded
+(dergipark host allowlist), and size-capped. The [academic ingester](sources.md) then extracts
+text. Confirmed end-to-end against a real article (`article/10` → `download/article-file/9`).
 
 ```bash
 uv run --extra sources python scripts/download_dergipark.py \
@@ -40,26 +44,48 @@ Assumptions to verify live: the OAI base URL + set specs (`?verb=Identify`/`List
 the per-article PDF URL shape (we treat `.pdf`/`/download/` identifiers as PDFs). Mostly CC BY
 per journal.
 
-## Government / legal — `sources/govscrape.py`
+## Government / legal — `sources/govscrape.py` (plain HTTP) + `sources/playwright_dl.py` (browser)
 
 | Source | Status | Notes |
 |--------|--------|-------|
-| Resmî Gazete | ✅ scraper | Walks the dated archive, parses the daily index, extracts each notice's text. **Verify** the URL pattern (`/eskiler/<YYYY>/<MM>/<YYYYMMDD>.htm` vs modern `/<YYYYMMDD>`) and index link shape. |
-| TBMM transcripts | ✅ scraper | Per-term index → HTML (`_html_to_text`) or PDF (reuses academic `extract_pdf_text`). **Verify** the term/session index URL + link markers. |
-| Yargıtay/Danıştay courts | 🚧 scaffold | JS-driven `karararama` SPAs — needs a JSON API if one exists, else Playwright (add to the `crawl` extra). ~3.4B tokens (the largest legal source); shard output. |
-| YÖKTEZ theses | 🚧 scaffold | Session + CAPTCHA gated; bulk download is restricted. Legitimate per-thesis flow + Playwright with manual CAPTCHA, then `ingest_academic --source yoktez`. |
+| Resmî Gazete | ⚠️ **use Playwright** | **Verified live 2026-06-08:** resmigazete.gov.tr returns 200 to a *browser* UA but blocks bot UAs (our honest bot UA → connection failure; robots.txt → 403). The plain-HTTP `govscrape.ingest_resmi_gazete` is therefore blocked from most clients; use `playwright_dl.download_resmi_gazete` (real browser). **Verified URL pattern:** `/eskiler/<YYYY>/<MM>/<YYYYMMDD>.htm` (and `/fihrist?tarih=YYYY-MM-DD`). |
+| TBMM transcripts | ✅ scraper (verify) | `govscrape.ingest_tbmm_tutanak`: per-term index → HTML (`_html_to_text`) or PDF (academic `extract_pdf_text`). Live probe: the tutanak landing 302-redirects; the term/session index URL + link markers still need live tuning. |
+| Yargıtay/Danıştay courts | 🚧 Playwright skeleton | `playwright_dl.download_court_decisions`: JS `karararama` SPAs — documented Playwright plan (navigate→search→paginate→extract), selectors need live tuning. ~3.4B tokens (largest legal source); shard output. |
+| YÖKTEZ theses | 🚧 Playwright skeleton | `playwright_dl.download_yoktez`: session + CAPTCHA gated; headed-mode + manual CAPTCHA, then PDFs → `ingest_academic --source yoktez`. |
 
 `_html_to_text(html)` tries `trafilatura` (lazy; via the `crawl` extra) and falls back to a
 stdlib `HTMLParser` tag-stripper, so it works under just the `sources` extra.
 
 ```bash
-uv run --extra sources python scripts/download_govlegal.py \
+# Browser-based (Resmî Gazete blocks bot UAs); needs a one-time `playwright install chromium`:
+uv run --extra playwright python scripts/download_browser.py \
     --source resmi_gazete --start-date 2024-01-01 --end-date 2024-01-31 --out output/raw/govlegal
+
+# TBMM via plain HTTP (verify URL patterns live):
 uv run --extra sources python scripts/download_govlegal.py --source tbmm --terms 27 28
 ```
 
-Legislation (mevzuat) is separate — it's a ready HF mirror, no scraping:
-`scripts/ingest_govlegal.py`.
+Legislation (mevzuat) is separate — a ready HF mirror, no scraping: `scripts/ingest_govlegal.py`.
+
+## Browser-based downloads — `sources/playwright_dl.py` (`--extra playwright`)
+
+For sites that block non-browser UAs (Resmî Gazete) or render via JS/are CAPTCHA-gated
+(courts, YÖKTEZ), `PlaywrightFetcher` drives a real headless Chromium. This is the honest
+path: rather than *spoofing* a browser UA on a plain HTTP client to evade a block, a real
+browser legitimately renders the page. Still throttled, still honours the spirit of robots,
+and government texts are public. Requires a one-time `playwright install chromium`.
+
+`download_resmi_gazete` is a real implementation (verified URL pattern); courts/YÖKTEZ are
+documented Playwright skeletons whose selectors need live tuning.
+
+## Verification status (probed 2026-06-08)
+
+| Endpoint | Result |
+|----------|--------|
+| DergiPark OAI-PMH | ✅ verified; PDF resolved via article page (`article/10`→`download/article-file/9`) |
+| Resmî Gazete | ⚠️ blocks bot UAs (403/blocked); 200 with browser → Playwright path; URL pattern confirmed |
+| TBMM tutanak | ⚠️ 302 redirect; index structure needs live tuning |
+| Yargıtay/Danıştay, YÖKTEZ | not probed (JS/CAPTCHA) — Playwright skeletons |
 
 ## Politeness & legal (KVKK)
 

@@ -15,8 +15,10 @@ from turkish_corpus.sources import dergipark  # noqa: E402
 pytestmark = pytest.mark.sources
 
 
-# A two-record ListRecords page: one article with a .pdf identifier, one without, plus a
-# resumptionToken (so paging continues). Namespaces match the real OAI/oai_dc envelope.
+# A two-record ListRecords page. dc:identifier holds the realistic DergiPark article *landing*
+# URL plus an izlik.org permalink (verified live 2026-06-08: neither is a direct PDF URL). The
+# second record has no article URL at all. A resumptionToken keeps paging going. Namespaces match
+# the real OAI/oai_dc envelope.
 _PAGE_WITH_TOKEN = """<?xml version="1.0" encoding="UTF-8"?>
 <OAI-PMH xmlns="http://www.openarchives.org/OAI/2.0/">
   <ListRecords>
@@ -27,8 +29,8 @@ _PAGE_WITH_TOKEN = """<?xml version="1.0" encoding="UTF-8"?>
                    xmlns:dc="http://purl.org/dc/elements/1.1/">
           <dc:title>Turkce Makale Bir</dc:title>
           <dc:language>tr</dc:language>
-          <dc:identifier>https://dergipark.org.tr/tr/pub/journal/article/111</dc:identifier>
-          <dc:identifier>https://dergipark.org.tr/download/article-file/111.pdf</dc:identifier>
+          <dc:identifier>https://dergipark.org.tr/en/pub/J/article/10</dc:identifier>
+          <dc:identifier>https://izlik.org/JA73JR34SZ</dc:identifier>
         </oai_dc:dc>
       </metadata>
     </record>
@@ -39,7 +41,7 @@ _PAGE_WITH_TOKEN = """<?xml version="1.0" encoding="UTF-8"?>
                    xmlns:dc="http://purl.org/dc/elements/1.1/">
           <dc:title>Makale Iki</dc:title>
           <dc:language>tr</dc:language>
-          <dc:identifier>https://dergipark.org.tr/tr/pub/journal/article/222</dc:identifier>
+          <dc:identifier>https://izlik.org/ZZ99ZZ99ZZ</dc:identifier>
         </oai_dc:dc>
       </metadata>
     </record>
@@ -59,13 +61,26 @@ _PAGE_NO_TOKEN = """<?xml version="1.0" encoding="UTF-8"?>
                    xmlns:dc="http://purl.org/dc/elements/1.1/">
           <dc:title>Makale Uc</dc:title>
           <dc:language>en</dc:language>
-          <dc:identifier>https://dergipark.org.tr/download/article-file/333.pdf</dc:identifier>
+          <dc:identifier>https://dergipark.org.tr/en/pub/J/article/33</dc:identifier>
         </oai_dc:dc>
       </metadata>
     </record>
     <resumptionToken></resumptionToken>
   </ListRecords>
 </OAI-PMH>
+"""
+
+# A realistic article-page HTML fragment carrying BOTH the full-text PDF anchor
+# (/tr/download/article-file/9) and a citation-download anchor
+# (/tr/download/article-cite-file/10/type/2). The resolver must pick the former, skip the latter.
+# Verified live 2026-06-08: the file id (9) differs from the article id (10).
+_ARTICLE_PAGE_HTML = """<!DOCTYPE html>
+<html lang="tr">
+  <body>
+    <a class="cite" href="/tr/download/article-cite-file/10/type/2">Atif (BibTeX)</a>
+    <a class="article-file" href="/tr/download/article-file/9">Tam Metin (PDF)</a>
+  </body>
+</html>
 """
 
 
@@ -139,14 +154,15 @@ class TestParseListRecords:
         assert first["identifier"] == "oai:dergipark.org.tr:article/111"
         assert first["title"] == "Turkce Makale Bir"
         assert first["language"] == "tr"
-        # The .pdf identifier is preferred over the landing-page identifier.
-        assert first["pdf_url"] == "https://dergipark.org.tr/download/article-file/111.pdf"
+        # The DergiPark article landing URL is picked — not the izlik.org permalink, and not a
+        # (non-existent) direct PDF URL.
+        assert first["article_url"] == "https://dergipark.org.tr/en/pub/J/article/10"
         # Raw Dublin Core is retained for downstream provenance.
         assert first["dc"]["title"] == ["Turkce Makale Bir"]
 
-        # The second record has no PDF-shaped identifier → pdf_url is None.
+        # The second record has only an izlik.org identifier → no article_url.
         assert second["title"] == "Makale Iki"
-        assert second["pdf_url"] is None
+        assert second["article_url"] is None
 
     def test_empty_token_is_none(self):
         records, token = dergipark.parse_listrecords(_PAGE_NO_TOKEN)
@@ -192,34 +208,72 @@ class TestHarvestRecords:
 
 
 class _DownloadSession:
-    """A fake session whose streamed ``.get(url)`` returns PDF bytes; records requested URLs.
+    """A fake session for the two-step resolve-then-download flow; records requested URLs.
 
-    Accepts ``**kwargs`` (``stream=True``) like the real session, and the returned response
-    supports ``iter_content`` so the streaming + size-cap download path is exercised. ``content``
-    is configurable so oversized-PDF behaviour can be tested.
+    An ``/article/`` URL returns the article-page HTML (so :func:`resolve_pdf_url` can extract the
+    ``/download/article-file/<id>`` link); any other URL (the resolved PDF) returns streamed PDF
+    bytes. Accepts ``**kwargs`` (``stream=True``) like the real session, and the PDF response
+    supports ``iter_content`` so the streaming + size-cap path is exercised. ``content`` is
+    configurable so oversized-PDF behaviour can be tested.
     """
 
-    def __init__(self, content: bytes = b"%PDF-1.4 fake") -> None:
+    def __init__(
+        self, content: bytes = b"%PDF-1.4 fake", *, article_html: str = _ARTICLE_PAGE_HTML
+    ) -> None:
         self.urls: list[str] = []
         self._content = content
+        self._article_html = article_html
 
     def get(self, url: str, **_kwargs) -> _FakeResponse:
         self.urls.append(url)
+        if "/article/" in url:
+            return _FakeResponse(text=self._article_html)
         return _FakeResponse(content=self._content)
 
 
+class TestExtractArticleFileHref:
+    def test_picks_article_file_over_cite_file(self):
+        href = dergipark.extract_article_file_href(
+            _ARTICLE_PAGE_HTML, "https://dergipark.org.tr/tr/pub/J/article/10"
+        )
+        # The full-text article-file link is resolved to an absolute URL; the cite-file is skipped.
+        assert href == "https://dergipark.org.tr/tr/download/article-file/9"
+
+    def test_returns_none_when_no_article_file(self):
+        html = '<a href="/tr/download/article-cite-file/10/type/2">cite only</a>'
+        assert (
+            dergipark.extract_article_file_href(html, "https://dergipark.org.tr/x") is None
+        )
+
+
+class TestResolvePdfUrl:
+    def test_resolves_to_absolute_pdf_url(self):
+        session = _DownloadSession()
+        url = dergipark.resolve_pdf_url(
+            session, "https://dergipark.org.tr/en/pub/J/article/10"
+        )
+        assert url == "https://dergipark.org.tr/tr/download/article-file/9"
+
+    def test_returns_none_when_page_has_no_pdf(self):
+        session = _DownloadSession(article_html="<html><body>no link here</body></html>")
+        url = dergipark.resolve_pdf_url(
+            session, "https://dergipark.org.tr/en/pub/J/article/10"
+        )
+        assert url is None
+
+
 class TestDownloadPdfs:
-    def test_writes_only_records_with_pdf_url(self, tmp_path):
+    def test_resolves_and_writes_records_with_article_url(self, tmp_path):
         records = [
             {
                 "identifier": "oai:dergipark.org.tr:article/111",
                 "language": "tr",
-                "pdf_url": "https://dergipark.org.tr/download/article-file/111.pdf",
+                "article_url": "https://dergipark.org.tr/en/pub/J/article/10",
             },
-            {  # no pdf_url → skipped
+            {  # no article_url → skipped (never fetched)
                 "identifier": "oai:dergipark.org.tr:article/222",
                 "language": "tr",
-                "pdf_url": None,
+                "article_url": None,
             },
         ]
         session = _DownloadSession()
@@ -231,18 +285,40 @@ class TestDownloadPdfs:
         # Filename is the sanitised identifier (no path separators / colons survive).
         assert written == ["oai_dergipark.org.tr_article_111.pdf"]
         assert (tmp_path / written[0]).read_bytes() == b"%PDF-1.4 fake"
+        # The article page was fetched, then the resolved PDF URL — two GETs for the one record.
+        assert session.urls == [
+            "https://dergipark.org.tr/en/pub/J/article/10",
+            "https://dergipark.org.tr/tr/download/article-file/9",
+        ]
+
+    def test_skips_records_with_unresolvable_page(self, tmp_path):
+        records = [
+            {
+                "identifier": "oai:dergipark.org.tr:article/111",
+                "language": "tr",
+                "article_url": "https://dergipark.org.tr/en/pub/J/article/10",
+            }
+        ]
+        session = _DownloadSession(article_html="<html><body>no pdf</body></html>")
+
+        count = dergipark.download_pdfs(records, tmp_path, session)
+
+        assert count == 0
+        assert list(tmp_path.glob("*.pdf")) == []
+        # Only the article page was fetched; no PDF download was attempted.
+        assert session.urls == ["https://dergipark.org.tr/en/pub/J/article/10"]
 
     def test_skips_non_turkish_records(self, tmp_path):
         records = [
             {
                 "identifier": "oai:dergipark.org.tr:article/333",
-                "language": "en",  # explicit non-Turkish → skipped
-                "pdf_url": "https://dergipark.org.tr/download/article-file/333.pdf",
+                "language": "en",  # explicit non-Turkish → skipped (never fetched)
+                "article_url": "https://dergipark.org.tr/en/pub/J/article/33",
             },
             {
                 "identifier": "oai:dergipark.org.tr:article/444",
                 "language": None,  # unknown language → kept
-                "pdf_url": "https://dergipark.org.tr/download/article-file/444.pdf",
+                "article_url": "https://dergipark.org.tr/tr/pub/J/article/44",
             },
         ]
         session = _DownloadSession()
@@ -253,13 +329,15 @@ class TestDownloadPdfs:
         assert [p.name for p in tmp_path.glob("*.pdf")] == [
             "oai_dergipark.org.tr_article_444.pdf"
         ]
+        # The non-Turkish record was never even fetched.
+        assert "https://dergipark.org.tr/en/pub/J/article/33" not in session.urls
 
     def test_limit_caps_downloads(self, tmp_path):
         records = [
             {
                 "identifier": f"oai:dergipark.org.tr:article/{i}",
                 "language": "tr",
-                "pdf_url": f"https://dergipark.org.tr/download/article-file/{i}.pdf",
+                "article_url": f"https://dergipark.org.tr/tr/pub/J/article/{i}",
             }
             for i in range(5)
         ]
@@ -301,36 +379,45 @@ class TestSafePdfUrl:
         assert dergipark._is_safe_pdf_url(url) is True
 
     def test_download_skips_ssrf_url(self, tmp_path):
-        # A record whose pdf_url points at the cloud metadata endpoint must be skipped, not fetched.
+        # A (hostile/compromised) article page that resolves the PDF link to the cloud metadata
+        # endpoint must be caught by the SSRF guard: the page is fetched, but the PDF is not.
+        article_url = "https://dergipark.org.tr/tr/pub/J/article/evil"
+        evil_html = (
+            '<a href="http://169.254.169.254/latest/download/article-file/1">PDF</a>'
+        )
         records = [
             {
                 "identifier": "oai:dergipark.org.tr:article/evil",
                 "language": "tr",
-                "pdf_url": "http://169.254.169.254/latest/meta-data/iam/x.pdf",
+                "article_url": article_url,
             }
         ]
-        session = _DownloadSession()
+        session = _DownloadSession(article_html=evil_html)
 
         count = dergipark.download_pdfs(records, tmp_path, session)
 
         assert count == 0
-        assert session.urls == []  # never even attempted the fetch
+        # The article page was fetched, but the resolved (unsafe) PDF URL was never requested.
+        assert session.urls == [article_url]
         assert list(tmp_path.glob("*.pdf")) == []
 
     def test_download_skips_off_allowlist_host(self, tmp_path):
+        article_url = "https://dergipark.org.tr/tr/pub/J/article/evil2"
+        evil_html = '<a href="https://evil.com/tr/download/article-file/1">PDF</a>'
         records = [
             {
                 "identifier": "oai:dergipark.org.tr:article/evil2",
                 "language": "tr",
-                "pdf_url": "https://evil.com/x.pdf",
+                "article_url": article_url,
             }
         ]
-        session = _DownloadSession()
+        session = _DownloadSession(article_html=evil_html)
 
         count = dergipark.download_pdfs(records, tmp_path, session)
 
         assert count == 0
-        assert session.urls == []
+        assert session.urls == [article_url]
+        assert list(tmp_path.glob("*.pdf")) == []
 
 
 class TestPdfSizeCap:
@@ -341,7 +428,7 @@ class TestPdfSizeCap:
             {
                 "identifier": "oai:dergipark.org.tr:article/huge",
                 "language": "tr",
-                "pdf_url": "https://dergipark.org.tr/download/article-file/huge.pdf",
+                "article_url": "https://dergipark.org.tr/tr/pub/J/article/huge",
             }
         ]
         session = _DownloadSession(content=big)
@@ -356,7 +443,7 @@ class TestPdfSizeCap:
             {
                 "identifier": "oai:dergipark.org.tr:article/ok",
                 "language": "tr",
-                "pdf_url": "https://dergipark.org.tr/download/article-file/ok.pdf",
+                "article_url": "https://dergipark.org.tr/tr/pub/J/article/ok",
             }
         ]
         session = _DownloadSession(content=b"%PDF-1.4 small")
@@ -390,7 +477,7 @@ class TestFilenameSanitisation:
             {
                 "identifier": "../../../evil",
                 "language": "tr",
-                "pdf_url": "https://dergipark.org.tr/download/article-file/9.pdf",
+                "article_url": "https://dergipark.org.tr/tr/pub/J/article/9",
             }
         ]
         session = _DownloadSession()

@@ -42,6 +42,10 @@ sentencepiece = ["sentencepiece>=0.2"]
 # Common Crawl index seed query (DuckDB) + Scrapy focused crawler + extraction (roadmap
 # step 3). trafilatura range kept compatible with datatrove's pin so the lock stays universal.
 crawl = ["duckdb>=1.1", "trafilatura>=1.8,<1.12", "scrapy>=2.13", "warcio>=1.7", "requests>=2.32"]
+# Browser-based downloads for sites that block non-browser UAs or render via JS:
+# Resmî Gazete (verified: 403/blocked for bot UAs), Yargıtay/Danıştay courts (JS SPA),
+# YÖKTEZ (session/CAPTCHA). Needs a one-time `playwright install chromium` for the browser.
+playwright = ["playwright>=1.40"]
 
 [project.scripts]
 tc-run-hplt = "turkish_corpus.cli:main"
@@ -73,4 +77,5 @@ markers = [
     "crawl: tests that require the optional `crawl` extra (scrapy/duckdb/trafilatura)",
     "sources: tests that require the optional `sources` extra (datasets/requests)",
     "academic: tests that require the optional `academic` extra (pypdf/pdfplumber)",
+    "playwright: tests that require the optional `playwright` extra",
 ]

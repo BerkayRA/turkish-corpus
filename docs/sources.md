@@ -79,9 +79,10 @@ Then mix the cleaned `*/final` dirs with [`build_blend`](blend.md).
 |--------|--------|--------|---------|----------|
 | Turkish Wikipedia | `wikipedia` | ✅ ingester | CC BY-SA | encyclopedic |
 | Legislation (mevzuat) | `govlegal` | ✅ ingester (HF mirror) | public | legal |
-| Resmî Gazete | `govscrape` | ✅ scraper (verify URLs) | public | legal |
-| TBMM transcripts | `govscrape` | ✅ scraper (verify URLs) | public | legal |
-| Yargıtay/Danıştay courts | `govscrape` | 🚧 scaffold (JS/Playwright) | public | legal |
-| DergiPark | `dergipark`+`academic` | ✅ OAI-PMH download + PDF→text | CC BY (per-journal) | academic |
+| Resmî Gazete | `playwright_dl` | ⚠️ Playwright (blocks bot UAs; URL verified) | public | legal |
+| TBMM transcripts | `govscrape` | ✅ scraper (verify URLs; 302 redirect) | public | legal |
+| Yargıtay/Danıştay courts | `playwright_dl` | 🚧 Playwright skeleton | public | legal |
+| YÖKTEZ download | `playwright_dl` | 🚧 Playwright skeleton (manual CAPTCHA) | research | academic |
+| DergiPark | `dergipark`+`academic` | ✅ OAI-PMH (live-verified) + PDF→text | CC BY (per-journal) | academic |
 | YÖKTEZ theses | `academic` | ✅ PDF→text (download scaffold; OCR for scans) | research | academic |
 | HPLT web | `pipeline` | ✅ anchor (step 1) | CC0 | web |

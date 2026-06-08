@@ -42,9 +42,15 @@ scaffolds — JS/CAPTCHA-gated, need Playwright.
 clean+blend. Note: datatrove's fasttext LID is NumPy-2-incompatible, so the optional
 language gate degrades to a logged skip (pin numpy<2 to enable).
 
-**Remaining within this step:** verify the gov-portal URL patterns on a live run, add the
-Playwright-based court/YÖKTEZ downloaders (+ optional OCR for scanned theses), and run the
-real ingest→clean→blend at scale.
+**Live verification + Playwright ✅** (2026-06-08, see [`acquisition.md`](acquisition.md)):
+probed the real endpoints — DergiPark OAI verified (PDF resolution fixed: article page →
+`download/article-file`, confirmed live); Resmî Gazete blocks bot UAs → moved to a real
+**Playwright** downloader (`sources/playwright_dl.py`, verified URL pattern); courts + YÖKTEZ
+are Playwright skeletons (selectors/CAPTCHA need live tuning); TBMM 302-redirects (tuning).
+
+**Remaining within this step:** tune the courts/YÖKTEZ Playwright selectors + TBMM index
+against the live sites (needs `playwright install chromium` + manual CAPTCHA for YÖKTEZ),
+optional OCR for scanned theses, and run the real ingest→clean→blend at scale.
 
 Original recipe sketch (web ↔ news ↔ wiki overlap is real, so dedup across sources):
 

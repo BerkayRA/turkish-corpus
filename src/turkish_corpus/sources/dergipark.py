@@ -3,9 +3,23 @@
 DergiPark (https://dergipark.org.tr) hosts thousands of Turkish open-access journals and
 exposes an **OAI-PMH** endpoint — the standard, polite interface *designed* for harvesting
 metadata. Rather than scrape article pages, we harvest Dublin Core records (title, language,
-identifiers) over OAI-PMH and pull each article's full-text PDF from the identifier URLs the
-record advertises. OAI-PMH is built for this, so the session disables robots.txt (it is the
-sanctioned bulk channel), but we still throttle and back off via :class:`PoliteSession`.
+identifiers) over OAI-PMH. OAI-PMH is built for this, so the session disables robots.txt (it is
+the sanctioned bulk channel), but we still throttle and back off via :class:`PoliteSession`.
+
+PDF RESOLUTION FLOW (verified live 2026-06-08)
+----------------------------------------------
+The OAI ``dc:identifier`` values are **not** direct PDF links — they are the article *landing*
+URL (``https://dergipark.org.tr/<lang>/pub/<journal>/article/<id>``) and an ``izlik.org``
+permalink, neither of which ends in ``.pdf`` or routes through ``/download/``. The real PDF
+link only appears on the article page. So resolution is a two-step flow:
+
+1. OAI gives the article landing URL (:func:`_best_article_url`, recorded as ``article_url``).
+2. Fetch that article page and extract the first ``/<lang>/download/article-file/<id>`` anchor
+   (:func:`resolve_pdf_url` / :func:`extract_article_file_href`), **excluding** the
+   ``/<lang>/download/article-cite-file/...`` citation links that also appear on the page. The
+   file id differs from the article id (e.g. article ``/10`` → file ``/9``).
+3. Download that ``/download/article-file/<id>`` URL (it is on dergipark.org.tr, so it passes
+   the :func:`_is_safe_pdf_url` SSRF allowlist) under the streamed :data:`MAX_PDF_BYTES` cap.
 
 This module only **downloads** PDFs. Turning them into datatrove-ready JSONL is the existing,
 offline extraction step in :mod:`.academic` (``ingest_dergipark`` / the ``ingest_academic``
@@ -18,8 +32,6 @@ ASSUMPTIONS TO VERIFY LIVE
   the available ``set`` specs (per-journal / per-publisher) should be confirmed against a live
   ``?verb=Identify`` / ``?verb=ListSets`` request before a real harvest — they are not pinned
   here and no network is touched in tests or at import.
-- PDF URLs are inferred best-effort from ``dc:identifier`` values (URLs ending in ``.pdf`` or
-  containing ``/download/``); DergiPark's per-article PDF URL shape should be re-checked live.
 
 LICENSE
 -------
@@ -41,7 +53,7 @@ import re
 import xml.etree.ElementTree as ET  # Element type hints only; parsing goes via _xml_fromstring
 from collections.abc import Iterable, Iterator
 from pathlib import Path
-from urllib.parse import quote, urlsplit
+from urllib.parse import quote, urljoin, urlsplit
 
 try:
     from defusedxml.ElementTree import fromstring as _xml_fromstring
@@ -54,6 +66,8 @@ __all__ = [
     "OAI_BASE",
     "parse_listrecords",
     "harvest_records",
+    "extract_article_file_href",
+    "resolve_pdf_url",
     "download_pdfs",
     "download_dergipark",
 ]
@@ -76,9 +90,18 @@ _NS = {
 # filters in the pipeline catch any non-Turkish slip-through).
 _TURKISH_LANGS = frozenset({"tr", "tur"})
 
-# A dc:identifier is treated as a PDF URL when it ends in .pdf or routes through a /download/
-# path (DergiPark serves article files under .../download/article-file/<id>). VERIFY LIVE.
-_PDF_URL = re.compile(r"\.pdf($|\?)|/download/", re.IGNORECASE)
+# A dc:identifier is the article landing URL when it is on a DergiPark host and contains an
+# /article/ path segment (e.g. https://dergipark.org.tr/tr/pub/<journal>/article/<id>). The
+# other identifier is an izlik.org permalink, which we ignore. Verified live 2026-06-08.
+_ARTICLE_URL = re.compile(r"https?://(?:www\.)?dergipark\.org\.tr/.*?/article/\d+", re.IGNORECASE)
+
+# The full-text PDF anchor on an article page: /<lang>/download/article-file/<file-id>. We must
+# NOT match /<lang>/download/article-cite-file/... (citation downloads), so "article-file" is
+# anchored to a path boundary. Verified live 2026-06-08.
+_ARTICLE_FILE_HREF = re.compile(
+    r"""href\s*=\s*["'](?P<href>/[^/"']+/download/article-file/\d+[^"']*)["']""",
+    re.IGNORECASE,
+)
 
 # Hard size caps on untrusted responses so a hostile/broken endpoint can't exhaust memory or
 # disk: a single OAI page's XML and a single article PDF. Generous enough for real DergiPark
@@ -89,7 +112,7 @@ MAX_PDF_BYTES = 50 * 1024 * 1024  # 50 MiB cap on a single article PDF
 # Cap the sanitised filename slug so "<slug>.pdf" stays under the 255-byte fs filename limit.
 _MAX_SLUG_LEN = 240
 
-# SSRF allowlist: pdf_url values come straight from untrusted OAI metadata, so we only fetch
+# SSRF allowlist: pdf_url values are resolved from untrusted article-page HTML, so we only fetch
 # from the known DergiPark hosts. EXTEND LIVE if PDFs are served from a verified CDN subdomain
 # (e.g. a cdn.dergipark.org.tr) — add it here only after confirming it against a real response.
 _PDF_HOST_ALLOWLIST = frozenset({"dergipark.org.tr", "www.dergipark.org.tr"})
@@ -112,11 +135,12 @@ _PRIVATE_HOST_RE = re.compile(
 def _is_safe_pdf_url(url: str) -> bool:
     """Whether ``url`` is safe to fetch as an article PDF (SSRF guard on untrusted OAI data).
 
-    ``pdf_url`` is taken verbatim from OAI ``dc:identifier`` metadata, so a hostile record could
-    point it at ``http://169.254.169.254/...`` (cloud metadata), ``localhost``, or an internal
-    RFC-1918 host. We require an ``http``/``https`` scheme, reject loopback / link-local / private
-    hosts, and enforce an allowlist of known DergiPark hosts (:data:`_PDF_HOST_ALLOWLIST`).
-    Returns ``False`` (skip + log) for anything that fails — fail closed.
+    ``url`` is resolved from an untrusted article page's HTML (:func:`resolve_pdf_url`), so a
+    hostile/compromised page could point it at ``http://169.254.169.254/...`` (cloud metadata),
+    ``localhost``, or an internal RFC-1918 host. We require an ``http``/``https`` scheme, reject
+    loopback / link-local / private hosts, and enforce an allowlist of known DergiPark hosts
+    (:data:`_PDF_HOST_ALLOWLIST`). Returns ``False`` (skip + log) for anything that fails — fail
+    closed. The expected ``/download/article-file/<id>`` URL is on dergipark.org.tr, so it passes.
     """
     try:
         split = urlsplit(url)
@@ -151,30 +175,69 @@ def _dc_fields(record: ET.Element) -> dict[str, list[str]]:
     return fields
 
 
-def _best_pdf_url(identifiers: list[str]) -> str | None:
-    """Pick the most likely full-text PDF URL from a record's dc:identifier values.
+def _best_article_url(identifiers: list[str]) -> str | None:
+    """Pick the DergiPark article landing URL from a record's dc:identifier values.
 
-    DergiPark records list several identifiers (landing page, DOI, file URL); we want the one
-    pointing at the actual PDF. Prefer an explicit ``.pdf`` URL, then a ``/download/`` URL,
-    else ``None`` (record has no resolvable PDF — skipped by the downloader).
+    DergiPark records advertise the article landing URL
+    (``https://dergipark.org.tr/<lang>/pub/<journal>/article/<id>``) and an ``izlik.org``
+    permalink — neither is a direct PDF link (verified live 2026-06-08). We return the first
+    identifier on a dergipark.org.tr host whose path contains ``/article/<digits>`` (ignoring the
+    izlik.org permalink), or ``None`` when no such URL is present. The PDF itself is resolved
+    from the article page later via :func:`resolve_pdf_url`.
     """
-    download_url: str | None = None
     for ident in identifiers:
-        if not ident.lower().startswith("http"):
+        if _ARTICLE_URL.match(ident.strip()):
+            return ident.strip()
+    return None
+
+
+def extract_article_file_href(html: str, base_url: str) -> str | None:
+    """Extract the full-text PDF href from an article page's HTML, as an absolute URL.
+
+    DergiPark article pages link the PDF as ``/<lang>/download/article-file/<file-id>`` and also
+    expose ``/<lang>/download/article-cite-file/<id>/type/<n>`` *citation* links — we want the
+    former and must skip the latter (verified live 2026-06-08; the file id differs from the
+    article id). Returns the first matching ``article-file`` href joined against ``base_url`` into
+    an absolute URL, or ``None`` when the page has no such anchor. Pure/testable: regex over the
+    raw HTML, no network and no new deps.
+    """
+    for match in _ARTICLE_FILE_HREF.finditer(html):
+        href = match.group("href")
+        # _ARTICLE_FILE_HREF anchors "/download/article-file/" so "article-cite-file" never
+        # matches; this guard is belt-and-braces in case the pattern is ever loosened.
+        if "article-cite-file" in href.lower():
             continue
-        if ".pdf" in ident.lower():
-            return ident
-        if "/download/" in ident.lower() and download_url is None:
-            download_url = ident
-    return download_url
+        return urljoin(base_url, href)
+    return None
+
+
+def resolve_pdf_url(session: PoliteSession, article_url: str) -> str | None:
+    """Resolve an article landing URL to its full-text PDF URL by fetching the article page.
+
+    GETs ``article_url`` via the (polite, throttled) ``session``, then parses the returned HTML
+    for the ``/<lang>/download/article-file/<id>`` anchor (see :func:`extract_article_file_href`),
+    returning it as an absolute URL on the DergiPark host. Any fetch error, an over-cap page, or a
+    page with no article-file link yields ``None`` (the caller logs + skips that record) so one
+    unresolvable article never aborts the batch.
+    """
+    try:
+        resp = session.get(article_url)
+    except Exception as exc:  # noqa: BLE001 — one bad fetch must not abort the harvest
+        logger.warning("failed to fetch article page %s: %s", article_url, exc)
+        return None
+    html = _capped_text(resp, article_url)
+    if html is None:
+        return None
+    return extract_article_file_href(html, article_url)
 
 
 def _parse_record(record: ET.Element) -> dict:
     """Build one harvested record dict from an OAI ``<record>`` element.
 
-    Keys: ``identifier`` (OAI header id), ``title``, ``language``, ``pdf_url`` (best-effort),
-    and ``dc`` (the raw Dublin Core ``{tag: [values]}`` map for downstream provenance).
-    First value wins for the scalar fields; ``pdf_url``/``language`` are ``None`` when absent.
+    Keys: ``identifier`` (OAI header id), ``title``, ``language``, ``article_url`` (the DergiPark
+    article landing URL; the PDF is resolved from it later via :func:`resolve_pdf_url`), and
+    ``dc`` (the raw Dublin Core ``{tag: [values]}`` map for downstream provenance). First value
+    wins for the scalar fields; ``article_url``/``language`` are ``None`` when absent.
     """
     header_id = record.findtext("oai:header/oai:identifier", default="", namespaces=_NS).strip()
     dc = _dc_fields(record)
@@ -185,7 +248,7 @@ def _parse_record(record: ET.Element) -> dict:
         "identifier": header_id,
         "title": titles[0] if titles else None,
         "language": languages[0] if languages else None,
-        "pdf_url": _best_pdf_url(identifiers),
+        "article_url": _best_article_url(identifiers),
         "dc": dc,
     }
 
@@ -305,13 +368,15 @@ def download_pdfs(
 ) -> int:
     """Download each record's PDF into ``out_pdf_dir/<safe-identifier>.pdf``; return the count.
 
-    Skips records without a ``pdf_url`` and records whose declared language is non-Turkish
-    (see :func:`_is_turkish`). The ``pdf_url`` is taken verbatim from untrusted OAI metadata, so
-    it is validated with :func:`_is_safe_pdf_url` (SSRF guard: scheme + private-host + allowlist)
-    before any fetch. Filenames are sanitised against path traversal (:func:`_safe_filename`).
-    ``limit`` (``-1`` = all) caps *successful* downloads so a smoke run stays small. The PDF is
-    streamed and aborted if it exceeds :data:`MAX_PDF_BYTES`; a single failed/oversized/unsafe
-    download is logged and skipped so one bad article never aborts the batch.
+    Skips records without an ``article_url`` and records whose declared language is non-Turkish
+    (see :func:`_is_turkish`). For each kept record the article landing page is fetched and its
+    full-text PDF URL resolved (:func:`resolve_pdf_url`); a record whose page yields no PDF link
+    is logged and skipped. The resolved URL is validated with :func:`_is_safe_pdf_url` (SSRF
+    guard: scheme + private-host + allowlist) before any fetch. Filenames are sanitised against
+    path traversal (:func:`_safe_filename`). ``limit`` (``-1`` = all) caps *successful* downloads
+    so a smoke run stays small. The PDF is streamed and aborted if it exceeds
+    :data:`MAX_PDF_BYTES`; a single failed/oversized/unsafe download is logged and skipped so one
+    bad article never aborts the batch.
     """
     out = Path(out_pdf_dir)
     out.mkdir(parents=True, exist_ok=True)
@@ -320,10 +385,14 @@ def download_pdfs(
     for record in records:
         if 0 < limit <= downloaded:
             return downloaded
-        pdf_url = record.get("pdf_url")
-        if not pdf_url:
+        article_url = record.get("article_url")
+        if not article_url:
             continue
         if not _is_turkish(record):
+            continue
+        pdf_url = resolve_pdf_url(session, article_url)
+        if not pdf_url:
+            logger.warning("no PDF link on article page, skipping: %s", article_url)
             continue
         if not _is_safe_pdf_url(pdf_url):
             logger.warning("skipping unsafe pdf_url (SSRF guard): %s", pdf_url)
