@@ -72,10 +72,19 @@ class PIIConfig:
 
 @dataclass
 class TokenizerConfig:
-    """Token counting for the final ``TokensCounter`` block.
+    """Token counting for the final datatrove ``TokensCounter`` block.
 
-    ``name_or_path=None`` skips token counting. Point this at the morphology-aware
-    tokenizer's ``tokenizer.json`` when ready (see ``tokenizer.py``).
+    ``name_or_path=None`` skips token counting. For the in-pipeline ``TokensCounter``, this
+    MUST be an HuggingFace tokenizer — a local ``tokenizer.json`` path or a Hub repo id —
+    because datatrove loads it via HF ``tokenizers``. Point it at the morpheme-aware BPE
+    once it's trained in the ``turkish-llm`` repo and exported to HF ``tokenizer.json``
+    (turkish-llm's ``byte_bpe_<V>.json`` is already in this format).
+
+    SentencePiece ``.model`` files and the ``turkish-tokenizer`` morphological analyzer are
+    NOT loadable here; they are supported by the standalone counter
+    (:func:`turkish_corpus.tokenizer.load_token_counter`) and the fertility tooling
+    (:mod:`turkish_corpus.fertility`, ``scripts/measure_fertility.py``). See
+    ``docs/tokenizer.md``.
     """
 
     name_or_path: str | None = None

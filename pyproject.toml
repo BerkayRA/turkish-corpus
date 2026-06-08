@@ -28,9 +28,13 @@ pipeline = [
 icu = ["PyICU>=2.12"]
 # Mojibake / encoding repair (HPLT is already ftfy-cleaned; useful for fresh crawl text).
 encoding = ["ftfy>=6.2"]
-# Common Crawl index seed query + extraction for the crawler tool (roadmap step 4).
-# trafilatura range kept compatible with datatrove's pin so the lock stays universal.
-crawl = ["duckdb>=1.1", "trafilatura>=1.8,<1.12"]
+# SentencePiece token counting for tokenizers trained/exported in the turkish-llm repo
+# (sp_unigram_*.model, sp_morph_*.model). HF tokenizer.json works via the core `tokenizers`
+# dep; this extra adds .model support for the standalone counter / fertility tooling.
+sentencepiece = ["sentencepiece>=0.2"]
+# Common Crawl index seed query (DuckDB) + Scrapy focused crawler + extraction (roadmap
+# step 3). trafilatura range kept compatible with datatrove's pin so the lock stays universal.
+crawl = ["duckdb>=1.1", "trafilatura>=1.8,<1.12", "scrapy>=2.13", "warcio>=1.7", "requests>=2.32"]
 
 [project.scripts]
 tc-run-hplt = "turkish_corpus.cli:main"

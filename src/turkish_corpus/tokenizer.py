@@ -6,18 +6,33 @@ tokenizers over-fragment Turkish (a "tokenization premium" up to ~10-15x more to
 word than English), so token budgets must be measured with the real tokenizer, not a
 generic one.
 
-This module defines a small :class:`TokenCounter` protocol with two implementations:
+This module defines a small :class:`TokenCounter` protocol with three implementations:
 
 - :class:`WhitespaceTokenCounter` — dependency-free baseline (also handy to *measure*
-  your tokenizer's fertility: tokens-per-word = hf_count / whitespace_count).
+  your tokenizer's fertility: tokens-per-word = subword_count / whitespace_count).
 - :class:`HFTokenCounter` — wraps any HuggingFace ``tokenizers`` tokenizer, loaded from a
   local ``tokenizer.json`` file or a Hub repo id.
+- :class:`SentencePieceTokenCounter` — wraps a SentencePiece ``.model`` file.
 
-When the morphology-aware tokenizer is ready, either (a) export it to ``tokenizer.json``
-and point :func:`load_token_counter` at the path, or (b) add a thin adapter class that
-satisfies the protocol. The datatrove pipeline counts tokens via its own
-``TokensCounter`` block (see ``config.TokenizerConfig.name_or_path``); this module is the
-standalone / test-time counterpart and the integration seam.
+Integration with the user's two sibling repos
+----------------------------------------------
+- ``BerkayRA/turkish-tokenizer`` is a pure-Python morphological **segmenter** (no integer
+  vocabulary, ~500-700 words/sec). It is wired up in :mod:`turkish_corpus.morphology` for
+  *fertility analysis*, not billion-scale in-pipeline counting (too slow).
+- ``BerkayRA/turkish-llm`` *trains and exports* the actual subword tokenizers this corpus
+  is sized against, into its ``models/`` dir:
+
+  * SentencePiece ``sp_unigram_<V>.model`` / ``sp_morph_<V>.model`` — load via
+    :class:`SentencePieceTokenCounter` (needs the optional ``sentencepiece`` extra).
+  * HuggingFace ``byte_bpe_<V>.json`` and the custom ``morpheme_bpe_<V>.json`` (both in
+    HF ``tokenizers`` format) — load via :class:`HFTokenCounter`.
+
+The morphology-aware BPE the user will train (the production tokenizer) lives in
+``turkish-llm``; export it to ``tokenizer.json`` and point :func:`load_token_counter` at
+the path. The datatrove pipeline counts tokens via its own ``TokensCounter`` block, which
+only accepts an HF ``tokenizer.json`` / Hub id (see ``config.TokenizerConfig.name_or_path``).
+SentencePiece ``.model`` files and the morphological analyzer are supported by *this*
+standalone counter and the fertility tooling, not the in-pipeline ``TokensCounter``.
 """
 
 from __future__ import annotations
@@ -29,6 +44,7 @@ __all__ = [
     "TokenCounter",
     "WhitespaceTokenCounter",
     "HFTokenCounter",
+    "SentencePieceTokenCounter",
     "load_token_counter",
 ]
 
@@ -84,12 +100,45 @@ class HFTokenCounter:
         return len(enc.ids)
 
 
+class SentencePieceTokenCounter:
+    """Count subword tokens with a SentencePiece ``.model`` file.
+
+    Handles the SentencePiece tokenizers exported by the ``turkish-llm`` repo
+    (``sp_unigram_<V>.model``, ``sp_morph_<V>.model``). ``sentencepiece`` is an optional
+    extra and imported lazily, so the pure core stays importable without it.
+
+    Parameters
+    ----------
+    model_path:
+        Path to a SentencePiece ``.model`` file.
+    """
+
+    def __init__(self, model_path: str) -> None:
+        import sentencepiece  # noqa: PLC0415  (optional extra, lazy for fast import)
+
+        self.model_path = model_path
+        self._sp = sentencepiece.SentencePieceProcessor(model_file=model_path)
+
+    @property
+    def name(self) -> str:
+        return self.model_path
+
+    def count(self, text: str) -> int:
+        if not text:
+            return 0
+        return len(self._sp.encode(text, out_type=int))
+
+
 def load_token_counter(spec: str | None = None, **kwargs) -> TokenCounter:
-    """Resolve a token-counter spec to an instance.
+    """Resolve a token-counter spec to an instance, dispatching by suffix.
 
     - ``None`` or ``"whitespace"`` -> :class:`WhitespaceTokenCounter`
-    - a path or Hub repo id        -> :class:`HFTokenCounter`
+    - a ``.model`` path            -> :class:`SentencePieceTokenCounter`
+    - a ``.json`` path or Hub id   -> :class:`HFTokenCounter`
     """
     if spec is None or spec == "whitespace":
         return WhitespaceTokenCounter()
+    if spec.endswith(".model"):
+        return SentencePieceTokenCounter(spec, **kwargs)
+    # `.json` files and bare Hub repo ids both load through HF `tokenizers`.
     return HFTokenCounter(spec, **kwargs)

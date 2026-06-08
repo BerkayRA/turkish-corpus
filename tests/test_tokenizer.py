@@ -4,6 +4,7 @@ from unittest.mock import MagicMock, patch
 
 from turkish_corpus.tokenizer import (
     HFTokenCounter,
+    SentencePieceTokenCounter,
     TokenCounter,
     WhitespaceTokenCounter,
     load_token_counter,
@@ -32,7 +33,7 @@ class TestLoadTokenCounter:
         counter = load_token_counter(None)
         assert isinstance(counter, TokenCounter)
 
-    def test_path_routes_to_hf_counter(self, tmp_path):
+    def test_json_path_routes_to_hf_counter(self, tmp_path):
         tok_file = tmp_path / "tokenizer.json"
         tok_file.write_text("{}")
         mock_tok = MagicMock()
@@ -40,6 +41,30 @@ class TestLoadTokenCounter:
         with patch("tokenizers.Tokenizer.from_file", return_value=mock_tok):
             counter = load_token_counter(str(tok_file))
             assert isinstance(counter, HFTokenCounter)
+
+    def test_model_path_routes_to_sentencepiece_counter(self):
+        mock_proc = MagicMock()
+        with patch("sentencepiece.SentencePieceProcessor", return_value=mock_proc):
+            counter = load_token_counter("/models/sp_morph_32000.model")
+            assert isinstance(counter, SentencePieceTokenCounter)
+
+
+class TestSentencePieceTokenCounter:
+    def test_counts_via_encode(self):
+        mock_proc = MagicMock()
+        mock_proc.encode.return_value = [4, 5, 6, 7, 8]
+        with patch("sentencepiece.SentencePieceProcessor", return_value=mock_proc) as ctor:
+            counter = SentencePieceTokenCounter("/models/sp_morph_32000.model")
+            assert counter.count("evlerimizden gelenler") == 5
+            assert counter.name == "/models/sp_morph_32000.model"
+            ctor.assert_called_once()
+
+    def test_empty_string_short_circuits(self):
+        mock_proc = MagicMock()
+        with patch("sentencepiece.SentencePieceProcessor", return_value=mock_proc):
+            counter = SentencePieceTokenCounter("/models/sp_morph_32000.model")
+            assert counter.count("") == 0
+            mock_proc.encode.assert_not_called()
 
 
 class TestHFTokenCounter:
