@@ -22,6 +22,7 @@ pipeline = [
     "fasttext-wheel>=0.9.2",
     "huggingface-hub>=0.25",
     "datasets>=3.0",  # required by datatrove's HuggingFaceDatasetReader (HPLT hf source)
+    "spacy>=3.7",  # datatrove's Turkish word tokenizer (MinHash n-grams) uses spaCy
 ]
 # Full-accuracy Turkish casing via ICU. Needs system icu4c (brew install icu4c).
 # Optional: the package ships a correct pure-Python Turkish casing fallback.
