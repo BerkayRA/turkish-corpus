@@ -8,12 +8,18 @@ tokens; the binding constraint is curation quality, not data availability.
 
 Turkish-aware datatrove cleaning pipeline anchored on **HPLT v2 `tur_Latn` (CC0)**:
 normalization (`ı/İ` casing), agglutination-tuned filters, KVKK PII scrubbing, MinHash
-near-dedup, pluggable token counting. Pure core fully unit-tested; pipeline assembled and
-config-validated.
+near-dedup (Turkish word tokenizer), pluggable token counting. Pure core fully unit-tested.
+**Verified end-to-end** on a real 300-doc HPLT slice (300 → 190 after filters → 1 near-dup
+dropped → 189 clean docs).
 
-**Next within this step:** run a dev slice with the `pipeline` extra; wire the
-morphology-aware tokenizer; derive a frequency-based stop-word list and calibrate
-thresholds from Turkish Wikipedia.
+**Tokenizer wiring ✅** (see [`tokenizer.md`](tokenizer.md)): `SentencePieceTokenCounter` +
+HF `tokenizer.json` support for the [`turkish-llm`](https://github.com/BerkayRA/turkish-llm)
+exports; a `morphology` bridge to [`turkish-tokenizer`](https://github.com/BerkayRA/turkish-tokenizer)
+(`tr_api`) and a fertility tool (`scripts/measure_fertility.py`). When the morpheme-aware BPE
+is trained in `turkish-llm`, export it to HF `tokenizer.json` and pass `--tokenizer`.
+
+**Remaining within this step:** derive a frequency-based stop-word list and calibrate
+quality thresholds from Turkish Wikipedia (currently sensible hand-set defaults).
 
 ## Step 2 — Register-diverse blend
 
@@ -35,9 +41,10 @@ All routed through the **same** `blocks` + `pipeline` cleaning backend, then a f
 cross-source MinHash dedup pass (collect ~1.15B raw → 1.0B clean). The main custom-
 collection work is OCR'ing YÖKTEZ theses.
 
-## Step 3 — Crawler (Common Crawl + Scrapy)
+## Step 3 — Crawler (Common Crawl + Scrapy) ✅
 
-A crawler is **optional** at 1B tokens but planned as a targeted top-up.
+Built (see [`crawler.md`](crawler.md)). A crawler is **optional** at 1B tokens but available
+as a targeted top-up.
 
 - **3a — CC index seed query (`--extra crawl`).** DuckDB over Common Crawl's columnar
   Parquet index: filter `content_languages = tur`, group by host, rank by Turkish page

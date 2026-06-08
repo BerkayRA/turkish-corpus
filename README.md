@@ -69,22 +69,36 @@ redact_turkish_pii("IBAN: TR33...").text  # -> "IBAN: <IBAN>"
 load_token_counter("/models/tr-morph/tokenizer.json").count("evlerimizden")
 ```
 
+## Sibling repos (tokenizers)
+
+This corpus is tokenized with the user's own tokenizers, wired in via
+[`docs/tokenizer.md`](docs/tokenizer.md):
+
+- [`BerkayRA/turkish-tokenizer`](https://github.com/BerkayRA/turkish-tokenizer) — pure-Python
+  morphological **segmenter** (`tr_api`), used here for *fertility analysis*.
+- [`BerkayRA/turkish-llm`](https://github.com/BerkayRA/turkish-llm) — where the
+  **morpheme-aware BPE** (and SentencePiece/byte-BPE baselines) are trained and exported.
+  Export it to HF `tokenizer.json` and pass `--tokenizer` to count real corpus tokens.
+
 ## Architecture
 
 Pure, dependency-free Turkish logic (`normalization`, `pii`, `tokenizer`, `filters`,
-`config`) is unit-tested on any machine; the datatrove integration (`blocks`, `pipeline`)
-is imported on demand and exercised when the `pipeline` extra is installed. Full diagram
-in [`docs/architecture.md`](docs/architecture.md); pipeline stages in
-[`docs/pipeline.md`](docs/pipeline.md).
+`config`, `fertility`, `crawl.cc_index`, `crawl.seeds`) is unit-tested on any machine; the
+heavy integrations (`blocks`, `pipeline`, `morphology`, `crawl.spider`/`pipelines`) are
+imported on demand and exercised under the `pipeline`/`sentencepiece`/`crawl` extras. Full
+diagram in [`docs/architecture.md`](docs/architecture.md); pipeline stages in
+[`docs/pipeline.md`](docs/pipeline.md); tokenizers in [`docs/tokenizer.md`](docs/tokenizer.md);
+crawler in [`docs/crawler.md`](docs/crawler.md).
 
 ## Roadmap
 
 Anchored on the research recommendation — see [`docs/roadmap.md`](docs/roadmap.md):
 
-1. ✅ **Pipeline foundation** — Turkish cleaning pipeline config (this repo).
-2. Register-diverse blend (Wikipedia, news, OpenSubtitles, OCR'd YÖKTEZ theses).
-3. **Crawler** — Common Crawl index seed query (DuckDB) + Scrapy focused crawler, sharing
-   this datatrove cleaning backend.
+1. ✅ **Pipeline foundation** — Turkish cleaning pipeline, verified end-to-end on real HPLT.
+2. **Register-diverse blend** (Wikipedia, news, OpenSubtitles, OCR'd YÖKTEZ theses) — next.
+3. ✅ **Crawler** — Common Crawl index seed query (DuckDB) + Scrapy focused crawler, sharing
+   this datatrove cleaning backend (output feeds `tc-run-hplt --source jsonl`).
+4. **Train + measure** — tokenize with the morpheme-aware BPE; report tokens & fertility.
 
 ## Development
 
