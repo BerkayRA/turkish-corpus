@@ -28,8 +28,10 @@ lot (see :mod:`turkish_corpus.tokenizer`).
 Memory / selection tradeoff
 ---------------------------
 To avoid always taking the first N documents of a shard (which would bias the blend toward
-whatever happens to sort first), selection is deterministically shuffled with
-``random.Random(shuffle_seed)``. Holding every document's *text* in memory would be
+whatever happens to sort first), selection is deterministically shuffled with a per-source
+``random.Random(f"{shuffle_seed}:{src.name}")`` (a *string* seed, so each source permutes
+independently yet reproducibly across runs — never the process-salted builtin ``hash()``).
+Holding every document's *text* in memory would be
 prohibitive at billions of tokens, so :func:`build_blend` uses a **two-pass, index-only**
 strategy: pass 1 streams each source and records only ``(shard_path, line_no, token_count)``
 per doc (small, ~tens of bytes/doc), shuffles those lightweight index entries, and greedily
@@ -37,6 +39,12 @@ picks until the source's token target is met; pass 2 re-streams the shards and w
 the selected lines. Memory is therefore O(total docs) in cheap index tuples, not O(corpus
 text) — the right tradeoff for this scale. Token counts are computed once (pass 1) and not
 recomputed in pass 2.
+
+At scale the pass-1 index is the dominant memory cost: each :class:`_DocIndex` entry runs
+~75-100 bytes/doc (the frozen dataclass plus the interned shard string and ints). At a
+typical ~300 tokens/doc, a 15B-token corpus is ≈50M docs ≈ ~4-5 GB RAM just for the index.
+On machines with <8 GB, reduce ``target_tokens`` (the index still spans the *available*
+docs, not the selected ones) or split the blend across smaller source sets / runs.
 
 Pure stdlib (json, gzip, glob, os, random); the token counter is the only heavy import and
 is loaded lazily.
@@ -49,6 +57,7 @@ import gzip
 import json
 import os
 import random
+import warnings
 from collections.abc import Iterator
 from dataclasses import dataclass
 
@@ -105,10 +114,27 @@ def iter_jsonl(path: str) -> Iterator[dict]:
 
 
 def _shards(path: str) -> list[str]:
-    """Return the sorted list of jsonl shard paths under ``path`` (gz and plain)."""
+    """Return the sorted list of jsonl shard paths under ``path`` (gz and plain).
+
+    Warns if two shards share the same stem (e.g. ``00000.jsonl`` and ``00000.jsonl.gz``
+    both present): that would double-index in pass 1 and double-emit in pass 2.
+    """
     plain = glob.glob(os.path.join(path, "*.jsonl"))
     gz = glob.glob(os.path.join(path, "*.jsonl.gz"))
-    return sorted(plain + gz)
+    shards = sorted(plain + gz)
+
+    seen: set[str] = set()
+    for shard in shards:
+        stem = os.path.basename(shard).removesuffix(".gz").removesuffix(".jsonl")
+        if stem in seen:
+            warnings.warn(
+                f"duplicate shard stem {stem!r} under {path!r}: a plain and a .gz shard share "
+                "the same stem and will be double-counted/double-emitted; remove one",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+        seen.add(stem)
+    return shards
 
 
 def _normalize_weights(sources: list[BlendSource]) -> list[float]:
@@ -252,7 +278,10 @@ def build_blend(
         src_target = round(weight * target_tokens)
         index, available = _index_source(src.path, counter)
 
-        rng = random.Random(shuffle_seed)
+        # Each source gets an independent shuffle so they don't all permute identically, but
+        # the seed is derived deterministically from the source name (a str seed, NOT the
+        # process-salted builtin hash()) so the blend stays reproducible across runs.
+        rng = random.Random(f"{shuffle_seed}:{src.name}")
         selected = _select(index, src_target, rng)
         # Achieved tokens come from the pass-1 counts of selected docs — no re-tokenizing.
         achieved = sum(d.tokens for d in index if (d.shard, d.line_no) in selected)
@@ -260,6 +289,17 @@ def build_blend(
         shard_path = os.path.join(blend_dir, f"{src.name}.jsonl.gz")
         with gzip.open(shard_path, "wt", encoding="utf-8") as out_fh:
             docs = _write_selected(src.path, selected, out_fh)
+
+        # Pass 2 must emit exactly the docs pass 1 selected. A mismatch means the shards
+        # changed between passes (mutated/truncated) — the blend is silently corrupt.
+        if docs != len(selected):
+            warnings.warn(
+                f"source {src.name!r}: pass 2 wrote {docs} doc(s) but pass 1 selected "
+                f"{len(selected)} — shards likely changed between passes; the blend may be "
+                "corrupt (re-run on a stable input)",
+                RuntimeWarning,
+                stacklevel=2,
+            )
 
         shortfall = max(0, src_target - achieved)
         per_source.append(

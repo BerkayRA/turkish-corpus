@@ -97,11 +97,13 @@ def write_records(
     opener = gzip.open if shard_name.endswith(".gz") else open
     with opener(path, "wt", encoding="utf-8") as fh:
         for rec in records:
+            # Validate structure BEFORE the length skip so a malformed (missing id/text)
+            # short record still raises instead of being silently dropped.
+            if "id" not in rec or "text" not in rec:
+                raise ValueError(f"record missing required id/text keys: {sorted(rec)}")
             text = rec.get("text") or ""
             if len(text.strip()) < min_chars:
                 continue
-            if "id" not in rec or "text" not in rec:
-                raise ValueError(f"record missing required id/text keys: {sorted(rec)}")
             fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
             written += 1
     return written

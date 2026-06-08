@@ -55,6 +55,17 @@ class TestRecordsFromPdfs:
         # passed the scanned skip.pdf, which is counted.
         assert records.needs_ocr == 1
 
+    def test_zero_limit_yields_all(self, tmp_path):
+        # limit=0 means "no limit" (consistent with the other ingesters), not "yield nothing".
+        def stub_extractor(path: Path) -> str | None:
+            return f"text {path.stem}"
+
+        paths = [tmp_path / f"{i}.pdf" for i in range(4)]
+        records = academic._records_from_pdfs(
+            paths, academic.DERGIPARK, stub_extractor, limit=0
+        )
+        assert len(list(records)) == 4
+
     def test_extractor_exception_is_treated_as_needs_ocr(self, tmp_path):
         # A blow-up in the extractor must not crash the batch; treat it as unreadable.
         def boom_extractor(path: Path) -> str | None:

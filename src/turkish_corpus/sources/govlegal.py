@@ -95,15 +95,16 @@ def _record_from_row(row: dict, idx: int) -> dict | None:
 
 
 def _records(rows: Iterable[dict], limit: int) -> Iterator[dict]:
-    """Yield records from ``rows``, stopping after ``limit`` emitted (``limit < 0`` = all).
+    """Yield records from ``rows``, stopping after ``limit`` emitted (``limit <= 0`` = all).
 
     A generator (not a list) so callers stream straight into :func:`write_records` without
     materializing the whole dataset, and so tests can drive it with a small fake iterable.
     The cap counts *emitted* records, not rows consumed, so textless rows don't eat budget.
+    ``limit=0`` means "no limit" (consistent with the other ingesters), not "yield nothing".
     """
     emitted = 0
     for idx, row in enumerate(rows):
-        if 0 <= limit <= emitted:
+        if 0 < limit <= emitted:
             return
         rec = _record_from_row(row, idx)
         if rec is None:

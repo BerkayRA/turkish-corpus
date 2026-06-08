@@ -50,6 +50,12 @@ class TestWriteRecords:
         with pytest.raises(ValueError, match="id/text"):
             write_records([{"text": "x but no id", "metadata": {}}], str(tmp_path / "s"))
 
+    def test_rejects_malformed_even_when_short(self, tmp_path):
+        # Structure is validated BEFORE the length skip, so a malformed record whose text is
+        # also below min_chars still raises instead of being silently dropped.
+        with pytest.raises(ValueError, match="id/text"):
+            write_records([{"text": "x", "metadata": {}}], str(tmp_path / "s"), min_chars=5)
+
     def test_plain_jsonl_when_not_gz(self, tmp_path):
         n = write_records(
             [make_record("metin", "d1", WIKI)], str(tmp_path / "s"), shard_name="part.jsonl"

@@ -92,16 +92,16 @@ def extract_pdf_text(pdf_path: str | Path, *, min_chars: int = _DEFAULT_MIN_CHAR
     """
     path = Path(pdf_path)
 
-    text = _extract_with_pypdf(path)
-    if len(text.strip()) >= min_chars:
+    text = _extract_with_pypdf(path).strip()
+    if len(text) >= min_chars:
         return text
 
     # pypdf came up short — try pdfplumber's stronger layout extraction before giving up.
-    plumber_text = _extract_with_pdfplumber(path)
-    if len(plumber_text.strip()) >= len(text.strip()):
+    plumber_text = _extract_with_pdfplumber(path).strip()
+    if len(plumber_text) >= len(text):
         text = plumber_text
 
-    if len(text.strip()) < min_chars:
+    if len(text) < min_chars:
         # No usable text layer from either library → scanned PDF, needs an OCR pass.
         return None
     return text
@@ -176,7 +176,7 @@ class _PdfRecords:
     A plain generator can't carry the OCR tally (generators reject attribute assignment), so
     a tiny iterator class exposes :attr:`needs_ocr` — read it *after* iteration completes.
     Paths the extractor returns falsy/``None`` for are *scanned* (need OCR): skipped but
-    tallied. ``limit`` (``< 0`` = all) counts *emitted* records, so scanned PDFs don't eat
+    tallied. ``limit`` (``<= 0`` = all) counts *emitted* records, so scanned PDFs don't eat
     the budget.
     """
 
@@ -192,7 +192,7 @@ class _PdfRecords:
     def __iter__(self) -> Iterator[dict]:
         emitted = 0
         for path in self._paths:
-            if 0 <= self._limit <= emitted:
+            if 0 < self._limit <= emitted:
                 return
             try:
                 text = self._extractor(path)

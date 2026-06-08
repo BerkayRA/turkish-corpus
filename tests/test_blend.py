@@ -2,8 +2,17 @@
 
 import gzip
 import json
+import warnings
 
-from turkish_corpus.blend import BlendSource, build_blend, iter_jsonl
+import pytest
+
+from turkish_corpus.blend import (
+    BlendSource,
+    _shards,
+    _write_selected,
+    build_blend,
+    iter_jsonl,
+)
 from turkish_corpus.sources.base import SourceInfo, make_record, write_records
 
 
@@ -150,3 +159,95 @@ class TestBuildBlend:
         ids2 = sorted(r["id"] for r in _read_blend_shard(out2, "s"))
         assert ids1 == ids2
         assert m1["sources"][0]["docs"] == m2["sources"][0]["docs"]
+
+    def test_per_source_seed_is_independent_but_reproducible(self, tmp_path):
+        # Two sources with IDENTICAL contents must not pick the SAME subset (per-source seed),
+        # yet each must pick the same subset across two runs (string seed, not salted hash()).
+        five_words = "bir iki uc dort bes"
+        docs = [(f"d{i}", five_words) for i in range(30)]
+        a_path = _make_source_dir(tmp_path, "a", "L", "web", docs)
+        b_path = _make_source_dir(tmp_path, "b", "L", "web", docs)
+        src = [BlendSource("a", a_path, weight=1.0), BlendSource("b", b_path, weight=1.0)]
+
+        out1, out2 = tmp_path / "o1", tmp_path / "o2"
+        build_blend(src, str(out1), target_tokens=50, tokenizer_spec=None, shuffle_seed=0)
+        build_blend(src, str(out2), target_tokens=50, tokenizer_spec=None, shuffle_seed=0)
+
+        a1 = sorted(r["id"] for r in _read_blend_shard(out1, "a"))
+        b1 = sorted(r["id"] for r in _read_blend_shard(out1, "b"))
+        a2 = sorted(r["id"] for r in _read_blend_shard(out2, "a"))
+        b2 = sorted(r["id"] for r in _read_blend_shard(out2, "b"))
+
+        # Reproducible across runs (would fail if seeded with the process-salted hash()).
+        assert a1 == a2
+        assert b1 == b2
+        # Independent shuffles: identical sources do not select the identical subset.
+        assert a1 != b1
+
+    def test_happy_path_docs_equal_selected_no_warning(self, tmp_path):
+        # On a stable input, pass 2 emits exactly what pass 1 selected → no corruption warning.
+        five_words = "bir iki uc dort bes"
+        path = _make_source_dir(
+            tmp_path, "s", "L", "web", [(f"s{i}", five_words) for i in range(10)]
+        )
+        out = tmp_path / "blend_out"
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", RuntimeWarning)
+            manifest = build_blend(
+                [BlendSource("s", path, weight=1.0)],
+                str(out),
+                target_tokens=20,
+                tokenizer_spec=None,
+            )
+        # docs reported equals the number of shard records actually written.
+        assert manifest["sources"][0]["docs"] == len(_read_blend_shard(out, "s"))
+
+
+class TestWriteSelected:
+    def test_warns_when_selection_references_missing_line(self, tmp_path):
+        # A (shard, line_no) that doesn't exist in the shard makes pass 2 under-emit; the
+        # mismatch (docs != len(selected)) is what build_blend warns on. Here we exercise the
+        # underlying count mismatch directly via _write_selected.
+        info = SourceInfo(name="s", license="L", register="web")
+        src_dir = tmp_path / "src"
+        write_records(
+            [make_record(t, i, info) for i, t in (("a", "x y z"), ("b", "u v w"))],
+            str(src_dir),
+            shard_name="00000.jsonl.gz",
+        )
+        shard = _shards(str(src_dir))[0]
+        # Select line 0 (exists) and line 99 (does not) → only one line written.
+        selected = {(shard, 0), (shard, 99)}
+        import io
+
+        buf = io.StringIO()
+        docs = _write_selected(str(src_dir), selected, buf)
+        assert docs == 1
+        assert docs != len(selected)  # build_blend turns this inequality into a RuntimeWarning
+
+
+class TestShards:
+    def test_warns_on_duplicate_stem(self, tmp_path):
+        info = SourceInfo(name="s", license="L", register="web")
+        # Same stem (00000) as both a plain and a gz shard → double-count hazard.
+        write_records(
+            [make_record("a b c", "a", info)], str(tmp_path), shard_name="00000.jsonl"
+        )
+        write_records(
+            [make_record("d e f", "b", info)], str(tmp_path), shard_name="00000.jsonl.gz"
+        )
+        with pytest.warns(RuntimeWarning, match="duplicate shard stem"):
+            _shards(str(tmp_path))
+
+    def test_no_warning_on_distinct_stems(self, tmp_path):
+        info = SourceInfo(name="s", license="L", register="web")
+        write_records(
+            [make_record("a b c", "a", info)], str(tmp_path), shard_name="00000.jsonl"
+        )
+        write_records(
+            [make_record("d e f", "b", info)], str(tmp_path), shard_name="00001.jsonl.gz"
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", RuntimeWarning)
+            shards = _shards(str(tmp_path))
+        assert len(shards) == 2

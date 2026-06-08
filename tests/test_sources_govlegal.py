@@ -50,6 +50,11 @@ class TestRecordsGenerator:
         rows = [{"text": f"m{i}"} for i in range(4)]
         assert len(list(govlegal._records(rows, limit=-1))) == 4
 
+    def test_zero_limit_yields_all(self):
+        # limit=0 means "no limit" (consistent with the other ingesters), not "yield nothing".
+        rows = [{"text": f"m{i}"} for i in range(4)]
+        assert len(list(govlegal._records(rows, limit=0))) == 4
+
 
 class TestScaffolds:
     @pytest.mark.parametrize(
@@ -70,6 +75,10 @@ class TestScaffolds:
 
 
 class TestIngestMevzuat:
+    # This class monkeypatches `datasets`, which only ships with the `sources` extra; skip
+    # cleanly when it isn't installed (mirrors test_sources_academic.py's pypdf importorskip).
+    datasets = pytest.importorskip("datasets")
+
     def test_writes_gzip_jsonl_without_network(self, tmp_path, monkeypatch):
         fake_rows = [
             {"id": "A", "text": "Birinci madde metni"},
@@ -82,9 +91,7 @@ class TestIngestMevzuat:
             return iter(fake_rows)
 
         # Patch the symbol where govlegal imports it (lazy `from datasets import ...`).
-        import datasets
-
-        monkeypatch.setattr(datasets, "load_dataset", fake_load_dataset)
+        monkeypatch.setattr(self.datasets, "load_dataset", fake_load_dataset)
 
         out_dir = tmp_path / "mevzuat"
         written = govlegal.ingest_mevzuat(str(out_dir), limit=-1)

@@ -61,12 +61,20 @@ def _parse_token_budget(value: str) -> int:
     """Parse a token budget like ``15_000_000_000``, ``15e9``, or ``15000000000`` to int.
 
     Accepts underscores (PEP 515 style) and scientific notation; rejects non-positive values.
+    Plain integers are parsed as ``int`` first to avoid float precision loss on huge values
+    (``int(float("..."))`` would round past 2^53); only scientific-notation forms like
+    ``15e9`` fall back to the float path.
     """
     cleaned = value.replace("_", "").strip()
     try:
-        tokens = int(float(cleaned))
-    except ValueError as exc:
-        raise argparse.ArgumentTypeError(f"--target-tokens must be a number: {value!r}") from exc
+        tokens = int(cleaned)
+    except ValueError:
+        try:
+            tokens = int(float(cleaned))
+        except ValueError as exc:
+            raise argparse.ArgumentTypeError(
+                f"--target-tokens must be a number: {value!r}"
+            ) from exc
     if tokens <= 0:
         raise argparse.ArgumentTypeError(f"--target-tokens must be positive, got {value!r}")
     return tokens
