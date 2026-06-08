@@ -56,22 +56,8 @@ class TestRecordsGenerator:
         assert len(list(govlegal._records(rows, limit=0))) == 4
 
 
-class TestScaffolds:
-    @pytest.mark.parametrize(
-        "func",
-        [
-            govlegal.ingest_resmi_gazete,
-            govlegal.ingest_court_decisions,
-            govlegal.ingest_tbmm_tutanak,
-        ],
-    )
-    def test_scaffold_raises_with_helpful_message(self, func, tmp_path):
-        with pytest.raises(NotImplementedError) as exc:
-            func(str(tmp_path))
-        message = str(exc.value)
-        assert "scaffold" in message.lower()
-        # The message names the polite-crawler approach so the next implementer is oriented.
-        assert "make_record" in message
+# Note: Resmî Gazete / TBMM scrapers (real) and court / YÖKTEZ scaffolds now live in
+# turkish_corpus.sources.govscrape; they are tested in test_sources_govscrape.py.
 
 
 class TestIngestMevzuat:

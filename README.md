@@ -88,6 +88,8 @@ heavy integrations (`blocks`, `pipeline`, `morphology`, `crawl.spider`/`pipeline
 imported on demand and exercised under the `pipeline`/`sentencepiece`/`crawl` extras. Full
 diagram in [`docs/architecture.md`](docs/architecture.md); pipeline stages in
 [`docs/pipeline.md`](docs/pipeline.md); tokenizers in [`docs/tokenizer.md`](docs/tokenizer.md);
+sources in [`docs/sources.md`](docs/sources.md); the blend in [`docs/blend.md`](docs/blend.md);
+data acquisition (downloaders/scrapers) in [`docs/acquisition.md`](docs/acquisition.md);
 crawler in [`docs/crawler.md`](docs/crawler.md).
 
 ## Roadmap

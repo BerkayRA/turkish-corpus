@@ -31,8 +31,14 @@ Wikipedia ✅, government/legal (mevzuat ✅; Resmî Gazete/courts/TBMM scaffold
 existing pipeline (`tc-run-hplt --source jsonl`) then combined by `build_blend` with weights,
 a token budget, and a manifest.
 
-**Remaining within this step:** write the gov/legal scrapers and the DergiPark/YÖKTEZ
-downloaders (+ optional OCR for scanned theses); run the real ingest→clean→blend at scale.
+**Acquisition layer ✅** (see [`acquisition.md`](acquisition.md)): a polite HTTP client
+(`sources/_http.py`), a DergiPark **OAI-PMH** downloader, and **Resmî Gazete + TBMM** scrapers
+(verify URL patterns live). Courts (Yargıtay/Danıştay) and YÖKTEZ downloaders remain
+scaffolds — JS/CAPTCHA-gated, need Playwright.
+
+**Remaining within this step:** verify the gov-portal URL patterns on a live run, add the
+Playwright-based court/YÖKTEZ downloaders (+ optional OCR for scanned theses), and run the
+real ingest→clean→blend at scale.
 
 Original recipe sketch (web ↔ news ↔ wiki overlap is real, so dedup across sources):
 

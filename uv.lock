@@ -1857,6 +1857,7 @@ sentencepiece = [
 ]
 sources = [
     { name = "datasets" },
+    { name = "defusedxml" },
     { name = "requests" },
 ]
 
@@ -1872,6 +1873,7 @@ requires-dist = [
     { name = "datasets", marker = "extra == 'pipeline'", specifier = ">=3.0" },
     { name = "datasets", marker = "extra == 'sources'", specifier = ">=3.0" },
     { name = "datatrove", extras = ["io", "processing"], marker = "extra == 'pipeline'", specifier = ">=0.5.0" },
+    { name = "defusedxml", marker = "extra == 'sources'", specifier = ">=0.7" },
     { name = "duckdb", marker = "extra == 'crawl'", specifier = ">=1.1" },
     { name = "fasttext-wheel", marker = "extra == 'pipeline'", specifier = ">=0.9.2" },
     { name = "ftfy", marker = "extra == 'encoding'", specifier = ">=6.2" },

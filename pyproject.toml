@@ -31,7 +31,7 @@ icu = ["PyICU>=2.12"]
 encoding = ["ftfy>=6.2"]
 # Register-diverse blend sources (roadmap step 2). HF-hosted sources (Turkish Wikipedia,
 # the mevzuat gov mirror) stream via `datasets`; requests for the scraped/gov endpoints.
-sources = ["datasets>=3.0", "requests>=2.32"]
+sources = ["datasets>=3.0", "requests>=2.32", "defusedxml>=0.7"]
 # Academic ingestion (YÖKTEZ theses, DergiPark): born-digital PDF text extraction. Scanned
 # PDFs additionally need an OCR step (tesseract) — documented, not a hard dependency.
 academic = ["pypdf>=4.0", "pdfplumber>=0.11", "requests>=2.32"]

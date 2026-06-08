@@ -29,27 +29,34 @@ uv run --extra sources python scripts/ingest_wikipedia.py \
     --out output/raw/wikipedia --dump 20231101.tr   # verify available dumps on the HF card
 ```
 
-### Government / legal — `sources/govlegal.py` (`--extra sources`)
-`mevzuat` (Turkish legislation) ships now via the `muhammetakkurt/mevzuat-gov-dataset` HF
-mirror (the text column is probed at runtime: `text→content→madde→icerik`). **Best license
-here** — official texts are public. Resmî Gazete, court decisions (Yargıtay/Danıştay), and
-TBMM transcripts are documented **scaffolds** (`NotImplementedError`) — they need polite
-scrapers (reuse the [crawler](crawler.md) politeness patterns) and are a later step.
+### Government / legal — `sources/govlegal.py` + `sources/govscrape.py` (`--extra sources`)
+`mevzuat` (Turkish legislation) ships via the `muhammetakkurt/mevzuat-gov-dataset` HF mirror
+(text column probed at runtime: `text→content→madde→icerik`) — no scraping. **Best license
+here** — official texts are public.
 
 ```bash
-uv run --extra sources python scripts/ingest_govlegal.py --source mevzuat --out output/raw/govlegal
+uv run --extra sources python scripts/ingest_govlegal.py --out output/raw/govlegal
 ```
+
+The scraped legal sources live in `govscrape.py` (`scripts/download_govlegal.py`) on the
+[polite HTTP client](acquisition.md): **Resmî Gazete** and **TBMM transcripts** are
+implemented (verify URL patterns live); **courts** (Yargıtay/Danıştay) and **YÖKTEZ** are
+documented scaffolds (JS/CAPTCHA-gated — need Playwright). See [`docs/acquisition.md`](acquisition.md).
 
 ### Academic — `sources/academic.py` (`--extra academic`)
 PDF text extraction for **DergiPark** (open-access journals; mostly CC BY per journal) and
 **YÖKTEZ** (theses; ~9B+ tokens, highest-quality long-form formal Turkish). `extract_pdf_text`
 reads the born-digital text layer (pypdf → pdfplumber fallback) and returns `None` for
 **scanned** PDFs, which need an OCR step (tesseract via `ocrmypdf`/`pytesseract`) —
-intentionally NOT a dependency. Downloaders are documented scaffolds (DergiPark exposes
-OAI-PMH + per-article PDFs; the YÖK portal is session/CAPTCHA-gated — the hard part).
+intentionally NOT a dependency.
+
+DergiPark now has a real **OAI-PMH downloader** (`sources/dergipark.py`,
+`scripts/download_dergipark.py`) — see [`docs/acquisition.md`](acquisition.md). YÖKTEZ
+download stays a scaffold (session/CAPTCHA-gated).
 
 ```bash
-# After downloading PDFs into a directory:
+# Download PDFs (DergiPark OAI-PMH), then extract text:
+uv run --extra sources python scripts/download_dergipark.py --out-pdf-dir /data/dergipark_pdfs
 uv run --extra academic python scripts/ingest_academic.py \
     --source dergipark --pdf-dir /data/dergipark_pdfs --out output/raw/academic
 ```
@@ -72,7 +79,9 @@ Then mix the cleaned `*/final` dirs with [`build_blend`](blend.md).
 |--------|--------|--------|---------|----------|
 | Turkish Wikipedia | `wikipedia` | ✅ ingester | CC BY-SA | encyclopedic |
 | Legislation (mevzuat) | `govlegal` | ✅ ingester (HF mirror) | public | legal |
-| Resmî Gazete / courts / TBMM | `govlegal` | 🚧 scaffold (needs scraper) | public | legal |
-| DergiPark | `academic` | ✅ PDF→text (download scaffold) | CC BY (per-journal) | academic |
+| Resmî Gazete | `govscrape` | ✅ scraper (verify URLs) | public | legal |
+| TBMM transcripts | `govscrape` | ✅ scraper (verify URLs) | public | legal |
+| Yargıtay/Danıştay courts | `govscrape` | 🚧 scaffold (JS/Playwright) | public | legal |
+| DergiPark | `dergipark`+`academic` | ✅ OAI-PMH download + PDF→text | CC BY (per-journal) | academic |
 | YÖKTEZ theses | `academic` | ✅ PDF→text (download scaffold; OCR for scans) | research | academic |
 | HPLT web | `pipeline` | ✅ anchor (step 1) | CC0 | web |
