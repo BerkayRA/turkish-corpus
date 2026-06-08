@@ -1,0 +1,61 @@
+[project]
+name = "turkish-corpus"
+version = "0.1.0"
+description = "High-quality ~1B-token Turkish (Türkçe) LLM pretraining corpus pipeline (HPLT v2 anchor) and crawler."
+readme = "README.md"
+authors = [
+    { name = "BerkayRA", email = "b.adanali@gmail.com" }
+]
+requires-python = ">=3.12,<3.13"
+license = { text = "Apache-2.0" }
+dependencies = [
+    # Light runtime dep used by the pluggable token counter. The Turkish-specific
+    # modules (normalization, PII) are pure-Python and need nothing else.
+    "tokenizers>=0.20",
+]
+
+[project.optional-dependencies]
+# The datatrove cleaning pipeline. Heavy; install on the Linux production box (and
+# on a dev machine to run end-to-end slices):  uv sync --extra pipeline
+pipeline = [
+    "datatrove[io,processing]>=0.5.0",
+    "fasttext-wheel>=0.9.2",
+    "huggingface-hub>=0.25",
+    "datasets>=3.0",  # required by datatrove's HuggingFaceDatasetReader (HPLT hf source)
+]
+# Full-accuracy Turkish casing via ICU. Needs system icu4c (brew install icu4c).
+# Optional: the package ships a correct pure-Python Turkish casing fallback.
+icu = ["PyICU>=2.12"]
+# Mojibake / encoding repair (HPLT is already ftfy-cleaned; useful for fresh crawl text).
+encoding = ["ftfy>=6.2"]
+# Common Crawl index seed query + extraction for the crawler tool (roadmap step 4).
+# trafilatura range kept compatible with datatrove's pin so the lock stays universal.
+crawl = ["duckdb>=1.1", "trafilatura>=1.8,<1.12"]
+
+[project.scripts]
+tc-run-hplt = "turkish_corpus.cli:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3",
+    "pytest-cov>=5.0",
+    "ruff>=0.7",
+]
+
+[build-system]
+requires = ["uv_build>=0.11.19,<0.12.0"]
+build-backend = "uv_build"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+markers = [
+    "pipeline: tests that require the optional `pipeline` extra (datatrove)",
+]
