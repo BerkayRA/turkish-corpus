@@ -29,6 +29,12 @@ pipeline = [
 icu = ["PyICU>=2.12"]
 # Mojibake / encoding repair (HPLT is already ftfy-cleaned; useful for fresh crawl text).
 encoding = ["ftfy>=6.2"]
+# Register-diverse blend sources (roadmap step 2). HF-hosted sources (Turkish Wikipedia,
+# the mevzuat gov mirror) stream via `datasets`; requests for the scraped/gov endpoints.
+sources = ["datasets>=3.0", "requests>=2.32"]
+# Academic ingestion (YÖKTEZ theses, DergiPark): born-digital PDF text extraction. Scanned
+# PDFs additionally need an OCR step (tesseract) — documented, not a hard dependency.
+academic = ["pypdf>=4.0", "pdfplumber>=0.11", "requests>=2.32"]
 # SentencePiece token counting for tokenizers trained/exported in the turkish-llm repo
 # (sp_unigram_*.model, sp_morph_*.model). HF tokenizer.json works via the core `tokenizers`
 # dep; this extra adds .model support for the standalone counter / fertility tooling.
@@ -64,4 +70,6 @@ addopts = "-ra"
 markers = [
     "pipeline: tests that require the optional `pipeline` extra (datatrove)",
     "crawl: tests that require the optional `crawl` extra (scrapy/duckdb/trafilatura)",
+    "sources: tests that require the optional `sources` extra (datasets/requests)",
+    "academic: tests that require the optional `academic` extra (pypdf/pdfplumber)",
 ]
