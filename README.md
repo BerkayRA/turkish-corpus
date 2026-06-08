@@ -95,7 +95,9 @@ crawler in [`docs/crawler.md`](docs/crawler.md).
 Anchored on the research recommendation — see [`docs/roadmap.md`](docs/roadmap.md):
 
 1. ✅ **Pipeline foundation** — Turkish cleaning pipeline, verified end-to-end on real HPLT.
-2. **Register-diverse blend** (Wikipedia, news, OpenSubtitles, OCR'd YÖKTEZ theses) — next.
+2. ✅ **Register-diverse blend** — Wikipedia + government/legal + academic (YÖKTEZ/DergiPark)
+   ingesters + a token-budget [mixer](docs/blend.md) (manifest, sized ~15–25B for a competent
+   model). See [`docs/sources.md`](docs/sources.md).
 3. ✅ **Crawler** — Common Crawl index seed query (DuckDB) + Scrapy focused crawler, sharing
    this datatrove cleaning backend (output feeds `tc-run-hplt --source jsonl`).
 4. **Train + measure** — tokenize with the morpheme-aware BPE; report tokens & fertility.

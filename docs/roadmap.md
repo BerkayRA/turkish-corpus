@@ -21,10 +21,20 @@ is trained in `turkish-llm`, export it to HF `tokenizer.json` and pass `--tokeni
 **Remaining within this step:** derive a frequency-based stop-word list and calibrate
 quality thresholds from Turkish Wikipedia (currently sensible hand-set defaults).
 
-## Step 2 — Register-diverse blend
+## Step 2 — Register-diverse blend ✅ (in progress → core built)
 
-A web-only corpus is fluent but narrow. Mix in higher-quality registers, deduped across
-sources (web ↔ news ↔ wiki overlap is real):
+Built the source framework + ingesters + token-budget mixer (see [`sources.md`](sources.md)
+and [`blend.md`](blend.md)). **Target is no longer a hard 1B** — size by model scale
+(~15–25B for a ~1B-param model; HPLT alone has 51.7B to fill the budget). Ingesters:
+Wikipedia ✅, government/legal (mevzuat ✅; Resmî Gazete/courts/TBMM scaffolded), academic
+(DergiPark/YÖKTEZ PDF→text ✅; downloaders + OCR-for-scans scaffolded). Each is cleaned by the
+existing pipeline (`tc-run-hplt --source jsonl`) then combined by `build_blend` with weights,
+a token budget, and a manifest.
+
+**Remaining within this step:** write the gov/legal scrapers and the DergiPark/YÖKTEZ
+downloaders (+ optional OCR for scanned theses); run the real ingest→clean→blend at scale.
+
+Original recipe sketch (web ↔ news ↔ wiki overlap is real, so dedup across sources):
 
 | Domain | Target share | Source | Effort |
 |--------|-------------:|--------|--------|
