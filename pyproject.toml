@@ -63,4 +63,5 @@ testpaths = ["tests"]
 addopts = "-ra"
 markers = [
     "pipeline: tests that require the optional `pipeline` extra (datatrove)",
+    "crawl: tests that require the optional `crawl` extra (scrapy/duckdb/trafilatura)",
 ]
