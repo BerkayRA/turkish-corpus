@@ -72,22 +72,30 @@ class PIIConfig:
 
 @dataclass
 class TokenizerConfig:
-    """Token counting for the final datatrove ``TokensCounter`` block.
+    """Token counting for the pipeline's final token-counting stage.
 
-    ``name_or_path=None`` skips token counting. For the in-pipeline ``TokensCounter``, this
-    MUST be an HuggingFace tokenizer — a local ``tokenizer.json`` path or a Hub repo id —
-    because datatrove loads it via HF ``tokenizers``. Point it at the morpheme-aware BPE
-    once it's trained in the ``turkish-llm`` repo and exported to HF ``tokenizer.json``
-    (turkish-llm's ``byte_bpe_<V>.json`` is already in this format).
+    ``name_or_path=None`` skips token counting. The pipeline dispatches on the spec:
 
-    SentencePiece ``.model`` files and the ``turkish-tokenizer`` morphological analyzer are
-    NOT loadable here; they are supported by the standalone counter
-    (:func:`turkish_corpus.tokenizer.load_token_counter`) and the fertility tooling
-    (:mod:`turkish_corpus.fertility`, ``scripts/measure_fertility.py``). See
-    ``docs/tokenizer.md``.
+    - an HF tokenizer (a ``tokenizer.json`` path or a Hub repo id) uses datatrove's fast,
+      natively-batched ``TokensCounter``;
+    - a SentencePiece ``.model`` file or the custom morpheme-BPE ``morpheme_bpe_<V>.json``
+      (top-level ``"morph_sep"``) uses :class:`turkish_corpus.blocks.TurkishTokensCounter`,
+      which wraps the matching standalone :class:`~turkish_corpus.tokenizer.TokenCounter`.
+
+    Point it at the morpheme-aware BPE the corpus is sized against (trained/exported in the
+    ``turkish-llm`` repo) to record the *real* token count. The morpheme-BPE counter needs the
+    ``turkish-tokenizer`` repo on ``sys.path`` (``TURKISH_TOKENIZER_PATH``) and is slow
+    (~600 words/s); see ``sample_rate``. SentencePiece ``.model`` support requires the
+    ``sentencepiece`` extra. See ``docs/tokenizer.md`` and ``docs/pipeline.md``.
     """
 
     name_or_path: str | None = None
+    # Fraction of documents to actually tokenize, in (0, 1]. The morpheme-BPE counter runs at
+    # ~600 words/s (pure-Python ``tr_api`` analysis per word), so for very large corpora set
+    # this < 1 to tokenize a deterministic sample and ESTIMATE the corpus total by multiplying
+    # the resulting ``tokens`` stat by ``1 / sample_rate``. HF/SentencePiece are fast enough to
+    # count every document (leave at 1.0). Ignored by the native HF ``TokensCounter`` path.
+    sample_rate: float = 1.0
 
 
 @dataclass

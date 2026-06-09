@@ -25,6 +25,7 @@ from .config import PipelineConfig
 
 __all__ = [
     "build_process_pipeline",
+    "build_token_counter_step",
     "run_local",
     "run_slurm",
 ]
@@ -134,6 +135,36 @@ def build_process_pipeline(config: PipelineConfig) -> list:
     return steps
 
 
+def build_token_counter_step(config: PipelineConfig):
+    """Return the final token-counting PipelineStep for ``config``, or ``None`` to skip.
+
+    Dispatch keeps datatrove's fast native HF path while adding SentencePiece and the
+    morpheme-aware BPE, which datatrove's ``TokensCounter`` cannot load:
+
+    - HF spec (NOT morpheme-BPE and NOT ``.model``) -> datatrove ``TokensCounter`` (native,
+      batched, fast).
+    - morpheme-BPE ``*.json`` (top-level ``"morph_sep"``) or SentencePiece ``*.model`` ->
+      :class:`turkish_corpus.blocks.TurkishTokensCounter` (honours ``tokenizer.sample_rate``).
+
+    Discrimination reuses :func:`turkish_corpus.tokenizer.is_morpheme_bpe_spec` plus the
+    ``.model`` suffix, so this and ``load_token_counter`` can never disagree on which spec is
+    morpheme-BPE.
+    """
+    spec = config.tokenizer.name_or_path
+    if not spec:
+        return None
+
+    from datatrove.pipeline.tokens import TokensCounter
+
+    from .tokenizer import is_morpheme_bpe_spec
+
+    if is_morpheme_bpe_spec(spec) or spec.endswith(".model"):
+        from .blocks import TurkishTokensCounter
+
+        return TurkishTokensCounter(spec, sample_rate=config.tokenizer.sample_rate)
+    return TokensCounter(tokenizer_name_or_path=spec)
+
+
 def _minhash_config(config: PipelineConfig):
     from datatrove.pipeline.dedup.minhash import MinhashConfig
     from datatrove.utils.hashing import HashConfig
@@ -164,7 +195,6 @@ def run_local(config: PipelineConfig):
         MinhashDedupSignature,
     )
     from datatrove.pipeline.readers import JsonlReader
-    from datatrove.pipeline.tokens import TokensCounter
     from datatrove.pipeline.writers import JsonlWriter
     from datatrove.utils.typeshelper import Languages
 
@@ -230,8 +260,9 @@ def run_local(config: PipelineConfig):
             exclusion_writer=JsonlWriter(_p(config, "removed_duplicates")),
         ),
     ]
-    if config.tokenizer.name_or_path:
-        final_steps.append(TokensCounter(tokenizer_name_or_path=config.tokenizer.name_or_path))
+    token_counter = build_token_counter_step(config)
+    if token_counter is not None:
+        final_steps.append(token_counter)
     final_steps.append(JsonlWriter(output_folder=_p(config, "final")))
 
     final = LocalPipelineExecutor(

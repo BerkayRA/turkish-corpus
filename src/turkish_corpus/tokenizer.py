@@ -51,6 +51,7 @@ __all__ = [
     "MorphemeBPE",
     "MorphemeBPETokenCounter",
     "load_token_counter",
+    "is_morpheme_bpe_spec",
 ]
 
 # Top-level JSON key that uniquely marks the custom morpheme-BPE format (turkish-llm). An HF
@@ -156,20 +157,26 @@ def load_token_counter(spec: str | None = None, **kwargs) -> TokenCounter:
         return WhitespaceTokenCounter()
     if spec.endswith(".model"):
         return SentencePieceTokenCounter(spec, **kwargs)
-    if spec.endswith(".json") and _is_morpheme_bpe_file(spec):
+    if spec.endswith(".json") and is_morpheme_bpe_spec(spec):
         return MorphemeBPETokenCounter(spec, **kwargs)
     # Other `.json` files and bare Hub repo ids both load through HF `tokenizers`.
     return HFTokenCounter(spec, **kwargs)
 
 
-def _is_morpheme_bpe_file(path: str) -> bool:
-    """True iff ``path`` is the custom morpheme-BPE JSON (top-level ``"morph_sep"`` key).
+def is_morpheme_bpe_spec(spec: str) -> bool:
+    """True iff ``spec`` is the custom morpheme-BPE JSON (top-level ``"morph_sep"`` key).
 
-    Reads defensively: a missing file or malformed JSON returns ``False`` so the caller falls
-    back to the HF loader rather than crashing on dispatch.
+    The discriminator is the *file shape*, not the extension: both the morpheme-BPE format and
+    an HF ``tokenizer.json`` use ``.json``, and only the morpheme-BPE format carries a top-level
+    ``"morph_sep"`` (HF's is nested under ``"model"``). This is the single source of truth used
+    both by :func:`load_token_counter`'s dispatch and by the in-pipeline ``TurkishTokensCounter``
+    dispatch in ``pipeline.py``, so they can never diverge.
+
+    Reads defensively: a non-path / Hub id / missing file / malformed JSON returns ``False`` so
+    callers fall back to the HF loader rather than crashing on dispatch.
     """
     try:
-        with open(path, encoding="utf-8") as f:
+        with open(spec, encoding="utf-8") as f:
             data = json.load(f)
     except (OSError, json.JSONDecodeError):
         return False

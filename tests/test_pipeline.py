@@ -10,10 +10,13 @@ datatrove = pytest.importorskip("datatrove", reason="needs `uv sync --extra pipe
 
 pytestmark = pytest.mark.pipeline
 
+import json  # noqa: E402
+
 from turkish_corpus.config import default_hplt_config  # noqa: E402
 from turkish_corpus.pipeline import (  # noqa: E402
     _lid_compatible,
     build_process_pipeline,
+    build_token_counter_step,
 )
 
 
@@ -70,3 +73,57 @@ def test_lid_compatible_reflects_numpy_major():
     import numpy
 
     assert _lid_compatible() == (int(numpy.__version__.split(".")[0]) < 2)
+
+
+def test_token_counter_step_none_when_unset():
+    cfg = default_hplt_config()
+    assert cfg.tokenizer.name_or_path is None
+    assert build_token_counter_step(cfg) is None
+
+
+def test_token_counter_step_morpheme_bpe_uses_turkish_counter(tmp_path):
+    # morpheme_bpe-shaped json (top-level "morph_sep") -> TurkishTokensCounter.
+    from turkish_corpus.blocks import TurkishTokensCounter
+
+    spec = tmp_path / "morpheme_bpe_20000.json"
+    spec.write_text(json.dumps({"morph_sep": "▁", "merges": []}), encoding="utf-8")
+    cfg = default_hplt_config()
+    cfg.tokenizer.name_or_path = str(spec)
+    cfg.tokenizer.sample_rate = 0.5
+    step = build_token_counter_step(cfg)
+    assert isinstance(step, TurkishTokensCounter)
+    assert step.sample_rate == 0.5
+    assert step.tokenizer_spec == str(spec)
+
+
+def test_token_counter_step_hf_json_uses_datatrove_counter(tmp_path):
+    # HF-shaped tokenizer.json (nested merges, no "morph_sep") -> datatrove TokensCounter.
+    from datatrove.pipeline.tokens import TokensCounter
+
+    spec = tmp_path / "tokenizer.json"
+    spec.write_text(
+        json.dumps({"version": "1.0", "model": {"type": "BPE", "merges": ["a b"]}}),
+        encoding="utf-8",
+    )
+    cfg = default_hplt_config()
+    cfg.tokenizer.name_or_path = str(spec)
+    step = build_token_counter_step(cfg)
+    assert isinstance(step, TokensCounter)
+
+
+def test_token_counter_step_sentencepiece_uses_turkish_counter():
+    from turkish_corpus.blocks import TurkishTokensCounter
+
+    cfg = default_hplt_config()
+    cfg.tokenizer.name_or_path = "/models/sp_morph_32000.model"
+    step = build_token_counter_step(cfg)
+    assert isinstance(step, TurkishTokensCounter)
+
+
+def test_token_counter_step_hub_id_uses_datatrove_counter():
+    from datatrove.pipeline.tokens import TokensCounter
+
+    cfg = default_hplt_config()
+    cfg.tokenizer.name_or_path = "dbmdz/bert-base-turkish-cased"
+    step = build_token_counter_step(cfg)
+    assert isinstance(step, TokensCounter)
