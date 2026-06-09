@@ -134,16 +134,26 @@ class TurkishQualityThresholds:
         """
         try:
             raw = _data_resource(_THRESHOLDS_FILENAME).read_text(encoding="utf-8")
-        except (FileNotFoundError, OSError):
+            overrides = json.loads(raw)
+        except (FileNotFoundError, OSError, json.JSONDecodeError):
+            # A missing artifact (fresh checkout) OR a corrupt/unparseable one must fail SAFE
+            # to defaults rather than crash at import time (config defaults to calibrated()).
             return cls()
-        overrides = json.loads(raw)
+        if not isinstance(overrides, dict):
+            return cls()
         # Only accept known numeric fields; ignore stop_words even if present in the JSON.
         allowed = {
             "min_doc_words", "max_doc_words", "min_avg_word_length", "max_avg_word_length",
             "max_symbol_word_ratio", "max_bullet_lines_ratio", "max_ellipsis_lines_ratio",
             "max_non_alpha_words_ratio", "min_stop_words",
         }
-        kwargs = {k: v for k, v in overrides.items() if k in allowed}
+        # Type-guard each merged value: a wrong-typed field (e.g. a string) must not reach
+        # __post_init__ / downstream filters. Drop non-numeric values (bools excluded).
+        kwargs = {
+            k: v
+            for k, v in overrides.items()
+            if k in allowed and isinstance(v, (int, float)) and not isinstance(v, bool)
+        }
         return cls(stop_words=TURKISH_STOPWORDS, **kwargs)
 
     def as_gopher_kwargs(self) -> dict[str, object]:

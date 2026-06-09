@@ -47,7 +47,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--limit",
         type=int,
         default=5000,
-        help="Number of Wikipedia articles to sample (default: 5000).",
+        help="Number of articles to sample (<=0 = unlimited / full dump).",
     )
     p.add_argument(
         "--dump",
@@ -82,6 +82,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 def _wikipedia_texts(dump: str, limit: int) -> Iterator[str]:
     """Stream up to ``limit`` Turkish Wikipedia article bodies as plain strings.
+
+    ``limit <= 0`` streams everything (the full dump, no cap).
 
     ``datasets`` is imported lazily (the ``sources`` extra) so this script imports without it.
     """

@@ -6,13 +6,14 @@ tokenizers over-fragment Turkish (a "tokenization premium" up to ~10-15x more to
 word than English), so token budgets must be measured with the real tokenizer, not a
 generic one.
 
-This module defines a small :class:`TokenCounter` protocol with three implementations:
+This module defines a small :class:`TokenCounter` protocol with these implementations:
 
 - :class:`WhitespaceTokenCounter` — dependency-free baseline (also handy to *measure*
   your tokenizer's fertility: tokens-per-word = subword_count / whitespace_count).
 - :class:`HFTokenCounter` — wraps any HuggingFace ``tokenizers`` tokenizer, loaded from a
   local ``tokenizer.json`` file or a Hub repo id.
 - :class:`SentencePieceTokenCounter` — wraps a SentencePiece ``.model`` file.
+- :class:`MorphemeBPETokenCounter` — wraps the custom morpheme-BPE format (see below).
 
 Integration with the user's two sibling repos
 ----------------------------------------------
@@ -24,15 +25,19 @@ Integration with the user's two sibling repos
 
   * SentencePiece ``sp_unigram_<V>.model`` / ``sp_morph_<V>.model`` — load via
     :class:`SentencePieceTokenCounter` (needs the optional ``sentencepiece`` extra).
-  * HuggingFace ``byte_bpe_<V>.json`` and the custom ``morpheme_bpe_<V>.json`` (both in
-    HF ``tokenizers`` format) — load via :class:`HFTokenCounter`.
+  * HuggingFace ``byte_bpe_<V>.json`` (HF ``tokenizers`` format) — load via
+    :class:`HFTokenCounter`.
+  * The custom ``morpheme_bpe_<V>.json`` is a CUSTOM (non-HF) format, NOT HF
+    ``tokenizers``. It is dispatched by its top-level ``"morph_sep"`` key to
+    :class:`MorphemeBPETokenCounter` (see :mod:`turkish_corpus.morpheme_bpe`).
 
 The morphology-aware BPE the user will train (the production tokenizer) lives in
-``turkish-llm``; export it to ``tokenizer.json`` and point :func:`load_token_counter` at
-the path. The datatrove pipeline counts tokens via its own ``TokensCounter`` block, which
-only accepts an HF ``tokenizer.json`` / Hub id (see ``config.TokenizerConfig.name_or_path``).
-SentencePiece ``.model`` files and the morphological analyzer are supported by *this*
-standalone counter and the fertility tooling, not the in-pipeline ``TokensCounter``.
+``turkish-llm``; :func:`load_token_counter` resolves its custom ``morpheme_bpe_<V>.json``
+directly (no HF export needed). The datatrove pipeline still counts HF tokenizers via
+datatrove's native ``TokensCounter``, but for SentencePiece ``.model`` files and the
+non-HF morpheme-BPE format it counts in-pipeline via
+:class:`turkish_corpus.blocks.TurkishTokensCounter`, which wraps the matching standalone
+counter here (see ``config.TokenizerConfig.name_or_path`` and ``pipeline.py``).
 """
 
 from __future__ import annotations
@@ -148,8 +153,8 @@ def load_token_counter(spec: str | None = None, **kwargs) -> TokenCounter:
       custom morpheme-BPE format (top-level ``"morph_sep"`` key), else :class:`HFTokenCounter`
     - a bare Hub repo id           -> :class:`HFTokenCounter`
 
-    The ``.json`` dispatch peeks at the top-level JSON keys rather than trusting the
-    extension: both the morpheme-BPE format and HF ``tokenizer.json`` use ``.json``, and only
+    The ``.json`` dispatch parses the file and inspects its top-level keys rather than trusting
+    the extension: both the morpheme-BPE format and HF ``tokenizer.json`` use ``.json``, and only
     the morpheme-BPE format has a top-level ``"morph_sep"``. A JSON read error falls back to
     :class:`HFTokenCounter` (HF accepts arbitrary local files / Hub ids).
     """
@@ -171,6 +176,11 @@ def is_morpheme_bpe_spec(spec: str) -> bool:
     ``"morph_sep"`` (HF's is nested under ``"model"``). This is the single source of truth used
     both by :func:`load_token_counter`'s dispatch and by the in-pipeline ``TurkishTokensCounter``
     dispatch in ``pipeline.py``, so they can never diverge.
+
+    This fully parses the file (``json.load``), not a partial/streaming peek at the top-level
+    keys — a fragile partial read isn't worth it for a one-time dispatch decision.
+    :class:`MorphemeBPETokenCounter` re-reads the same file at construction; that one extra
+    parse at dispatch/construction time is an acceptable cost.
 
     Reads defensively: a non-path / Hub id / missing file / malformed JSON returns ``False`` so
     callers fall back to the HF loader rather than crashing on dispatch.

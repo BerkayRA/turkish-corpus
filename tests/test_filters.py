@@ -20,6 +20,16 @@ class _MissingResource:
         raise FileNotFoundError("simulated missing artifact")
 
 
+class _FileResource:
+    """A resource handle that reads a real tmp file, to simulate a committed (bad) artifact."""
+
+    def __init__(self, path):
+        self._path = path
+
+    def read_text(self, *a, **k):
+        return self._path.read_text(encoding="utf-8")
+
+
 class TestStopwords:
     def test_non_empty(self):
         assert len(TURKISH_STOPWORDS) > 0
@@ -61,6 +71,26 @@ class TestThresholdDefaults:
 
     def test_calibrated_uses_module_stopwords(self):
         assert TurkishQualityThresholds.calibrated().stop_words == TURKISH_STOPWORDS
+
+    def test_calibrated_falls_back_on_invalid_json(self, tmp_path, monkeypatch):
+        # A corrupt/unparseable committed artifact must fail SAFE to defaults, not crash at
+        # import time (config defaults to calibrated()).
+        bad = tmp_path / "turkish_thresholds.json"
+        bad.write_text("{ this is not valid json", encoding="utf-8")
+        monkeypatch.setattr(filters_mod, "_data_resource", lambda _f: _FileResource(bad))
+        calibrated = TurkishQualityThresholds.calibrated()
+        default = TurkishQualityThresholds()
+        assert calibrated.min_doc_words == default.min_doc_words
+        assert calibrated.max_avg_word_length == default.max_avg_word_length
+
+    def test_calibrated_drops_wrong_typed_field(self, tmp_path, monkeypatch):
+        # A wrong-typed field (string where a number is expected) must be dropped, never
+        # reaching __post_init__; the rest of the object stays at defaults.
+        bad = tmp_path / "turkish_thresholds.json"
+        bad.write_text('{"min_doc_words": "bad"}', encoding="utf-8")
+        monkeypatch.setattr(filters_mod, "_data_resource", lambda _f: _FileResource(bad))
+        calibrated = TurkishQualityThresholds.calibrated()
+        assert calibrated.min_doc_words == TurkishQualityThresholds().min_doc_words
 
 
 class TestGopherKwargs:

@@ -53,3 +53,15 @@ class TestValidation:
         cfg.minhash.num_buckets = 0
         with pytest.raises(ValueError, match="minhash"):
             cfg.validate()
+
+    def test_sample_rate_zero_rejected(self):
+        cfg = default_hplt_config()
+        cfg.tokenizer.sample_rate = 0
+        with pytest.raises(ValueError, match="sample_rate"):
+            cfg.validate()
+
+    def test_sample_rate_above_one_rejected(self):
+        cfg = default_hplt_config()
+        cfg.tokenizer.sample_rate = 1.5
+        with pytest.raises(ValueError, match="sample_rate"):
+            cfg.validate()

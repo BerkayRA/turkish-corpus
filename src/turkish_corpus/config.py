@@ -142,6 +142,10 @@ class PipelineConfig:
             raise ValueError("minhash buckets/hashes must be >= 1")
         if not (0.0 <= self.language.threshold <= 1.0):
             raise ValueError("language.threshold must be in [0, 1]")
+        if not (0.0 < self.tokenizer.sample_rate <= 1.0):
+            raise ValueError(
+                f"tokenizer.sample_rate must be in (0, 1], got {self.tokenizer.sample_rate!r}"
+            )
 
 
 def default_hplt_config(**overrides) -> PipelineConfig:

@@ -4,6 +4,8 @@ These pin the pure derivation logic (quantiles, stat accumulation, stopword/thre
 derivation) and the artifact round-trip — all with synthetic Turkish text, no network.
 """
 
+import pytest
+
 from turkish_corpus.calibration import (
     STOPWORDS_FILENAME,
     THRESHOLDS_FILENAME,
@@ -193,3 +195,13 @@ class TestCalibrateFromCorpus:
         assert "thresholds" in report
         assert "sample_quantiles" in report
         assert "stop_words" not in report["thresholds"]
+
+    def test_empty_corpus_raises(self):
+        # No documents -> cannot derive thresholds from nothing.
+        with pytest.raises(ValueError, match="empty corpus"):
+            calibrate_from_corpus([])
+
+    def test_whitespace_only_corpus_raises(self):
+        # All docs skipped by CorpusStats.add -> n_docs == 0 -> same guard fires.
+        with pytest.raises(ValueError, match="empty corpus"):
+            calibrate_from_corpus(["", "   ", "\n"])

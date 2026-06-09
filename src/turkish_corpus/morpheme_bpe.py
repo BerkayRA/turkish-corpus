@@ -195,7 +195,7 @@ class MorphemeBPETokenCounter:
         """
         return sum(len(self._encode_word_cached(word)) for word in text.split())
 
-    def cache_info(self):
+    def cache_info(self) -> functools.CacheInfo | None:
         """``functools.lru_cache`` stats (hits/misses/maxsize/currsize), or ``None`` if the
         cache is disabled — useful to confirm the expected ~90%+ hit rate on real text."""
         info = getattr(self._encode_word_cached, "cache_info", None)

@@ -20,8 +20,12 @@ from __future__ import annotations
 
 import logging
 import os
+from typing import TYPE_CHECKING
 
 from .config import PipelineConfig
+
+if TYPE_CHECKING:  # pragma: no cover - annotations only; PipelineStep is a heavy import
+    from datatrove.pipeline.base import PipelineStep
 
 __all__ = [
     "build_process_pipeline",
@@ -79,7 +83,7 @@ def _make_reader(config: PipelineConfig):
     )
 
 
-def build_process_pipeline(config: PipelineConfig) -> list:
+def build_process_pipeline(config: PipelineConfig) -> list[PipelineStep]:
     """Stage A: read + filter + normalize + scrub, writing an intermediate dataset."""
     _require_datatrove()
     config.validate()
@@ -135,7 +139,7 @@ def build_process_pipeline(config: PipelineConfig) -> list:
     return steps
 
 
-def build_token_counter_step(config: PipelineConfig):
+def build_token_counter_step(config: PipelineConfig) -> PipelineStep | None:
     """Return the final token-counting PipelineStep for ``config``, or ``None`` to skip.
 
     Dispatch keeps datatrove's fast native HF path while adding SentencePiece and the

@@ -237,6 +237,12 @@ def calibrate_from_corpus(
     for text in texts:
         stats.add(text)
 
+    if stats.n_docs == 0:
+        raise ValueError(
+            "calibrate_from_corpus received no documents; cannot derive thresholds from an "
+            "empty corpus."
+        )
+
     stopwords = derive_stopwords(stats, top_n=top_n)
     thresholds = derive_thresholds(
         stats, strategy=strategy, q=q, stop_words=frozenset(stopwords)
@@ -263,18 +269,20 @@ def _threshold_numbers(thresholds: TurkishQualityThresholds) -> dict:
 
 def _sample_quantiles(stats: CorpusStats, q: float) -> dict:
     """Raw low/high quantiles of each metric, for provenance in the report."""
-    return {
-        metric: {
-            "low": _quantile(sorted(values), q),
-            "high": _quantile(sorted(values), 1.0 - q),
+    out: dict = {}
+    for metric, values in (
+        ("mean_word_length", stats.mean_word_length),
+        ("n_words", [float(n) for n in stats.n_words]),
+        ("symbol_word_ratio", stats.symbol_word_ratio),
+        ("non_alpha_words_ratio", stats.non_alpha_words_ratio),
+    ):
+        # Sort once and reuse for both quantiles (was sorting the same list twice).
+        ordered = sorted(values)
+        out[metric] = {
+            "low": _quantile(ordered, q),
+            "high": _quantile(ordered, 1.0 - q),
         }
-        for metric, values in (
-            ("mean_word_length", stats.mean_word_length),
-            ("n_words", [float(n) for n in stats.n_words]),
-            ("symbol_word_ratio", stats.symbol_word_ratio),
-            ("non_alpha_words_ratio", stats.non_alpha_words_ratio),
-        )
-    }
+    return out
 
 
 def write_artifacts(
@@ -312,6 +320,6 @@ def load_stopwords(path: str | Path) -> frozenset[str]:
     return frozenset(line.strip() for line in text.splitlines() if line.strip())
 
 
-def load_thresholds(path: str | Path) -> dict:
+def load_thresholds(path: str | Path) -> dict[str, float]:
     """Load the numeric threshold kwargs JSON back into a dict."""
     return json.loads(Path(path).read_text(encoding="utf-8"))

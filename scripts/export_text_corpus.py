@@ -49,15 +49,18 @@ def main(argv: list[str] | None = None) -> int:
     if not 0.0 < args.eval_fraction < 1.0:
         raise SystemExit("--eval-fraction must be in (0, 1)")
 
-    # Collect unique documents (dedup by id across sources), as single-line text.
+    # Collect unique documents (dedup by id across sources), as single-line text. Records
+    # WITHOUT an id are kept as-is (treated as unique) rather than collapsed: a falsy id must
+    # not be added to `seen`, else every id-less doc would dedup against the first one.
     seen: set[str] = set()
     docs: list[str] = []
     for clean_dir in args.clean_dirs:
         for rec in iter_jsonl(clean_dir):
             doc_id = rec.get("id")
-            if doc_id in seen:
-                continue
-            seen.add(doc_id)
+            if doc_id:
+                if doc_id in seen:
+                    continue
+                seen.add(doc_id)
             line = " ".join((rec.get("text") or "").split())
             if len(line) >= args.min_chars:
                 docs.append(line)
