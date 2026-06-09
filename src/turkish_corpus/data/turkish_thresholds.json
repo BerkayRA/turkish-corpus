@@ -1,0 +1,11 @@
+{
+  "min_doc_words": 11,
+  "max_doc_words": 100000,
+  "min_avg_word_length": 4.956754926108374,
+  "max_avg_word_length": 8.181893939393941,
+  "max_symbol_word_ratio": 0.05,
+  "max_bullet_lines_ratio": 0.9,
+  "max_ellipsis_lines_ratio": 0.3,
+  "max_non_alpha_words_ratio": 0.2845363062352014,
+  "min_stop_words": 2
+}

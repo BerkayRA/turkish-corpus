@@ -1,0 +1,36 @@
+{
+  "strategy": "quantile",
+  "q": 0.005,
+  "top_n": 175,
+  "n_docs": 5000,
+  "n_unique_words": 226146,
+  "thresholds": {
+    "min_doc_words": 11,
+    "max_doc_words": 100000,
+    "min_avg_word_length": 4.956754926108374,
+    "max_avg_word_length": 8.181893939393941,
+    "max_symbol_word_ratio": 0.05,
+    "max_bullet_lines_ratio": 0.9,
+    "max_ellipsis_lines_ratio": 0.3,
+    "max_non_alpha_words_ratio": 0.2845363062352014,
+    "min_stop_words": 2
+  },
+  "sample_quantiles": {
+    "mean_word_length": {
+      "low": 4.956754926108374,
+      "high": 8.181893939393941
+    },
+    "n_words": {
+      "low": 11.0,
+      "high": 9767.600000000013
+    },
+    "symbol_word_ratio": {
+      "low": 0.0,
+      "high": 0.008850085853916272
+    },
+    "non_alpha_words_ratio": {
+      "low": 0.0,
+      "high": 0.2845363062352014
+    }
+  }
+}

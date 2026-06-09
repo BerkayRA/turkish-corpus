@@ -18,8 +18,13 @@ exports; a `morphology` bridge to [`turkish-tokenizer`](https://github.com/Berka
 (`tr_api`) and a fertility tool (`scripts/measure_fertility.py`). When the morpheme-aware BPE
 is trained in `turkish-llm`, export it to HF `tokenizer.json` and pass `--tokenizer`.
 
-**Remaining within this step:** derive a frequency-based stop-word list and calibrate
-quality thresholds from Turkish Wikipedia (currently sensible hand-set defaults).
+**Filter calibration ✅** ([`calibration.md`](calibration.md)): derived a 175-word
+frequency-ranked stop-word list and the Gopher/quality thresholds from a 5000-article Turkish
+Wikipedia sample (FineWeb-2 "canary language" method); artifacts committed under
+`turkish_corpus/data/`, loaded by `filters.py` with curated fallback, and used by default via
+`PipelineConfig.quality = TurkishQualityThresholds.calibrated()`. Notable: `max_avg_word_length`
+came out 8.18 (tighter than the 12.0 guess); `max_doc_words` kept generous so long-form
+theses/laws aren't dropped.
 
 ## Step 2 — Register-diverse blend ✅ (in progress → core built)
 

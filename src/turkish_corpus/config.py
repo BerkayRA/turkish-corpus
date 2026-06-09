@@ -105,7 +105,12 @@ class PipelineConfig:
     """Top-level pipeline configuration."""
 
     reader: ReaderConfig = field(default_factory=ReaderConfig)
-    quality: TurkishQualityThresholds = field(default_factory=TurkishQualityThresholds)
+    # Use the Turkish-Wikipedia-calibrated stopwords + thresholds when the artifacts are
+    # present (scripts/calibrate_filters.py), else the curated/default fallback. See
+    # docs/calibration.md.
+    quality: TurkishQualityThresholds = field(
+        default_factory=TurkishQualityThresholds.calibrated
+    )
     language: LanguageConfig = field(default_factory=LanguageConfig)
     minhash: MinhashParams = field(default_factory=MinhashParams)
     pii: PIIConfig = field(default_factory=PIIConfig)
