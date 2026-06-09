@@ -23,22 +23,35 @@ serves as the linguistic ground truth for evaluating a subword vocabulary.
 | `spec` | Counter | Needs |
 |--------|---------|-------|
 | `None` / `"whitespace"` | `WhitespaceTokenCounter` | nothing (baseline / fertility denominator) |
-| `*.json` or a Hub repo id | `HFTokenCounter` | core `tokenizers` dep |
+| `morpheme_bpe_<V>.json` (top-level `"morph_sep"`) | `MorphemeBPETokenCounter` | `tr_api` via `TURKISH_TOKENIZER_PATH` |
+| other `*.json` or a Hub repo id | `HFTokenCounter` | core `tokenizers` dep |
 | `*.model` | `SentencePieceTokenCounter` | `uv sync --extra sentencepiece` |
+
+`.json` dispatch peeks at the file's **top-level JSON keys**, not just the extension: the
+custom `morpheme_bpe_<V>.json` carries a top-level `"morph_sep"` key, whereas an HF
+`tokenizer.json` carries `"model"`/`"version"` and only a *nested* `merges`. So the
+morpheme-aware BPE (turkish-llm's best tokenizer) now loads via `load_token_counter` for
+standalone fertility / sizing — it needs the `turkish-tokenizer` repo (`TURKISH_TOKENIZER_PATH`)
+to segment each word into morphemes before applying the learned merges. A malformed/unreadable
+`.json` falls back to `HFTokenCounter`.
 
 ```python
 from turkish_corpus.tokenizer import load_token_counter
 
 # turkish-llm exports → drop straight in:
-load_token_counter("/models/byte_bpe_32000.json").count("evlerimizden")     # HF
-load_token_counter("/models/sp_morph_32000.model").count("evlerimizden")    # SentencePiece
+load_token_counter("/models/byte_bpe_32000.json").count("evlerimizden")        # HF
+load_token_counter("/models/sp_morph_32000.model").count("evlerimizden")       # SentencePiece
+load_token_counter("/models/morpheme_bpe_20000.json").count("evlerimizden")    # MorphemeBPE
 ```
 
 ### Counting tokens *inside* the datatrove pipeline
 
 The datatrove `TokensCounter` block loads via HF `tokenizers`, so for in-pipeline counting
 `config.TokenizerConfig.name_or_path` (CLI `--tokenizer`) **must be an HF `tokenizer.json`
-or Hub id** — not a SentencePiece `.model`:
+or Hub id** — not a SentencePiece `.model`, and not the custom `morpheme_bpe_<V>.json`
+(which is *not* HF format). To count corpus tokens with the morpheme-aware BPE, either use the
+standalone `MorphemeBPETokenCounter` (e.g. via `scripts/measure_fertility.py`) or export the
+tokenizer to HF `tokenizer.json` and pass that to the pipeline:
 
 ```bash
 # Once the morpheme-aware BPE is exported to HF tokenizer.json in turkish-llm:
@@ -72,6 +85,13 @@ uv run python scripts/measure_fertility.py \
     --tokenizer /models/sp_morph_32000.model \
     --input sample_tr.txt \
     --turkish-tokenizer-path /path/to/turkish-tokenizer
+
+# Measure the morpheme-aware BPE (turkish-llm's best tokenizer) the same way — it needs the
+# segmenter to analyse each word into morphemes before applying the learned merges:
+uv run python scripts/measure_fertility.py \
+    --tokenizer /models/morpheme_bpe_20000.json \
+    --input sample_tr.txt \
+    --turkish-tokenizer-path /path/to/turkish-tokenizer
 ```
 
 Output: `tokens`, `words`, `tokens/word`, and (with the segmenter) `morphemes`,
@@ -81,7 +101,10 @@ that still respects morpheme boundaries.
 ## API surface
 
 - `turkish_corpus.tokenizer` — `TokenCounter` protocol, `WhitespaceTokenCounter`,
-  `HFTokenCounter`, `SentencePieceTokenCounter`, `load_token_counter`.
+  `HFTokenCounter`, `SentencePieceTokenCounter`, `MorphemeBPE`, `MorphemeBPETokenCounter`
+  (re-exported from `turkish_corpus.morpheme_bpe`), `load_token_counter`.
+- `turkish_corpus.morpheme_bpe` — `MorphemeBPE` (pure merge engine, `.from_file(path)`,
+  `.encode(morphemes)`), `MorphemeBPETokenCounter` (`.encode_word(word)`, `.count(text)`).
 - `turkish_corpus.morphology` — `ensure_tr_api_importable(repo_path=None)` (adds the
   `turkish-tokenizer` repo to `sys.path`, like turkish-llm's `_tok.py`; resolves from arg or
   `TURKISH_TOKENIZER_PATH`), `MorphologicalSegmenter` (`.segment(text)`, `.count(text)`).
