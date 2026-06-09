@@ -23,16 +23,21 @@ Segmentation dependency
 Counting a word means analysing it into morphemes first, which needs the
 ``BerkayRA/turkish-tokenizer`` repo (``tr_api``) on ``sys.path`` — located via the
 ``repo_path`` argument or the ``TURKISH_TOKENIZER_PATH`` env var (see
-:func:`turkish_corpus.morphology.ensure_tr_api_importable`). Because that analyzer is
-pure-Python and slow (~500-700 words/sec), this counter is for **standalone fertility /
-sizing** over a sample, not billion-scale in-pipeline counting. The in-pipeline datatrove
-``TokensCounter`` still requires an HF ``tokenizer.json``; this custom format is not HF, so to
-count corpus tokens with the morpheme-aware BPE either use this standalone counter or export
-the tokenizer to HF format.
+:func:`turkish_corpus.morphology.ensure_tr_api_importable`).
+
+The analyzer is pure-Python and slow (~500-700 words/sec) *per unique form*, but Turkish text
+has a ~5.5% type/token ratio (≈92% of tokens repeat a form already seen), so the per-word
+``lru_cache`` (see ``cache_size``) makes the amortized cost an order of magnitude lower over a
+corpus and warms up serving. For full deployment, precomputing a top-~1M ``word→pieces`` table
+covers ~96% of tokens at lookup speed with the analyzer handling only the long tail. The
+in-pipeline datatrove ``TokensCounter`` still requires an HF ``tokenizer.json`` (this custom
+format is not HF), so count corpus tokens with the morpheme-aware BPE via this counter (e.g.
+the :class:`turkish_corpus.blocks.TurkishTokensCounter` block) rather than that path.
 """
 
 from __future__ import annotations
 
+import functools
 import json
 from pathlib import Path
 
@@ -104,9 +109,22 @@ class MorphemeBPETokenCounter:
         Optional path to the ``turkish-tokenizer`` clone; forwarded to
         :func:`turkish_corpus.morphology.ensure_tr_api_importable` (else resolved from
         ``TURKISH_TOKENIZER_PATH``).
+    cache_size:
+        Per-word ``lru_cache`` size for the (slow) tr_api analysis + merge. Turkish text has a
+        ~5.5% type/token ratio (~92% of tokens are repeats of a form already seen), so caching
+        per *unique* word form gives an order-of-magnitude speedup over a corpus and warms
+        serving. ``None`` = unbounded (best for one-pass corpus tokenization, grows with the
+        vocabulary); a bounded size (default 1,000,000 — covers ~96% of tokens by frequency)
+        caps memory for long-running / serving use. ``0``/negative disables caching.
     """
 
-    def __init__(self, merges_path: str, *, repo_path: str | None = None) -> None:
+    def __init__(
+        self,
+        merges_path: str,
+        *,
+        repo_path: str | None = None,
+        cache_size: int | None = 1_000_000,
+    ) -> None:
         from turkish_corpus.morphology import (  # noqa: PLC0415  (avoid import cycle / lazy)
             ensure_tr_api_importable,
         )
@@ -127,15 +145,28 @@ class MorphemeBPETokenCounter:
             )
         )
 
+        # Memoize per unique word form (the analysis is the bottleneck; merges are cheap).
+        # Bound the wrapper to this instance so the cache is GC'd with it (no global leak) and
+        # keyed only on the word (merges are fixed per instance). maxsize=None when disabled
+        # would never evict, so map "disabled" to a tiny dummy by skipping the cache instead.
+        maxsize = cache_size if cache_size is None else max(int(cache_size), 0)
+        self._cache_enabled = maxsize is None or maxsize > 0
+        self._encode_word_cached = (
+            functools.lru_cache(maxsize=maxsize)(self._encode_word_uncached)
+            if self._cache_enabled
+            else self._encode_word_uncached
+        )
+
     @property
     def name(self) -> str:
         return self.merges_path
 
-    def encode_word(self, word: str) -> list[str]:
-        """Morpheme-BPE tokens for a single word (matches ``MorphemeBPEAdapter.encode``).
+    def _encode_word_uncached(self, word: str) -> tuple[str, ...]:
+        """Morpheme-BPE tokens for one word as an immutable tuple (matches
+        ``MorphemeBPEAdapter.encode``).
 
-        ``split_clitics=False`` keeps the flat ``{"morphemes": [...]}`` shape per word (no
-        clitic ``"segments"`` split), so morphemes come straight off the top-level analysis.
+        Returned immutable so the lru_cache can safely share it; ``split_clitics=False`` keeps
+        the flat ``{"morphemes": [...]}`` shape (no clitic ``"segments"`` split).
         """
         analysis = self._tokenizer.tokenize(
             word,
@@ -151,8 +182,21 @@ class MorphemeBPETokenCounter:
         )
         if not morphs:
             morphs = [word]
-        return self._bpe.encode(morphs)
+        return tuple(self._bpe.encode(morphs))
+
+    def encode_word(self, word: str) -> list[str]:
+        """Cached morpheme-BPE tokens for a single word (fresh list; safe to mutate)."""
+        return list(self._encode_word_cached(word))
 
     def count(self, text: str) -> int:
-        """Morpheme-BPE token count for ``text`` (``count("") == 0``)."""
-        return sum(len(self.encode_word(word)) for word in text.split())
+        """Morpheme-BPE token count for ``text`` (``count("") == 0``).
+
+        Reads the cached tuples directly (no per-call list copy) for speed.
+        """
+        return sum(len(self._encode_word_cached(word)) for word in text.split())
+
+    def cache_info(self):
+        """``functools.lru_cache`` stats (hits/misses/maxsize/currsize), or ``None`` if the
+        cache is disabled — useful to confirm the expected ~90%+ hit rate on real text."""
+        info = getattr(self._encode_word_cached, "cache_info", None)
+        return info() if info is not None else None

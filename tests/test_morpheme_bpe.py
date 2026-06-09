@@ -169,6 +169,57 @@ class TestMorphemeBPETokenCounter:
         assert isinstance(counter, TokenCounter)
 
 
+class TestCaching:
+    """Per-word memoization: the slow tr_api analysis runs once per unique form."""
+
+    def _counting_fake(self, monkeypatch):
+        """Fake tr_api whose tokenize increments a shared call counter."""
+        calls = {"n": 0}
+
+        class _FakeTok:
+            def __init__(self, config):
+                pass
+
+            def tokenize(self, word, **kw):
+                calls["n"] += 1
+                return {"parsed": True, "morphemes": [{"chunk": word}]}
+
+        fake = types.ModuleType("tr_api")
+        fake.Tokenizer = _FakeTok
+        fake.TokenizerConfig = lambda **kw: dict(kw)
+        monkeypatch.setitem(sys.modules, "tr_api", fake)
+        monkeypatch.setattr(
+            "turkish_corpus.morphology.ensure_tr_api_importable", lambda repo_path=None: None
+        )
+        return calls
+
+    def _merges_file(self, tmp_path):
+        p = tmp_path / "morpheme_bpe.json"
+        p.write_text(json.dumps({"morph_sep": "▁", "merges": []}), encoding="utf-8")
+        return str(p)
+
+    def test_repeated_words_analyzed_once(self, tmp_path, monkeypatch):
+        calls = self._counting_fake(monkeypatch)
+        counter = MorphemeBPETokenCounter(self._merges_file(tmp_path))
+        assert counter.count("ev ev ev ev") == 4  # 1 token each (no merges)
+        assert calls["n"] == 1  # analyzed once despite 4 occurrences
+        info = counter.cache_info()
+        assert info.hits == 3 and info.misses == 1
+
+    def test_cache_disabled_analyzes_every_time(self, tmp_path, monkeypatch):
+        calls = self._counting_fake(monkeypatch)
+        counter = MorphemeBPETokenCounter(self._merges_file(tmp_path), cache_size=0)
+        assert counter.count("ev ev ev") == 3
+        assert calls["n"] == 3  # no caching -> analyzed each occurrence
+        assert counter.cache_info() is None
+
+    def test_encode_word_returns_fresh_mutable_list(self, tmp_path, monkeypatch):
+        self._counting_fake(monkeypatch)
+        counter = MorphemeBPETokenCounter(self._merges_file(tmp_path))
+        a, b = counter.encode_word("ev"), counter.encode_word("ev")
+        assert a == b and a is not b  # cached tuple shared internally, but caller gets a copy
+
+
 @pytest.mark.skipif(
     not os.path.isfile(os.path.join(_REAL_REPO, "tr_api.py")),
     reason="turkish-tokenizer repo not locatable (set TURKISH_TOKENIZER_PATH)",
