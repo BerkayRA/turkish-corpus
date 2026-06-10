@@ -381,6 +381,27 @@ class TestLosslessRoundTrip:
         text = "ev geldi Ankara iPhone 🎉"
         assert tok.decode(tok.encode(text)) == text
 
+    def test_byte_word_before_morpheme_word(self, tmp_path, monkeypatch):
+        # Regression: a byte-BPE (OOV/mixed) word IMMEDIATELY followed by a morpheme word must
+        # not feed the ▁-prefixed morpheme piece into the byte decoder (was KeyError '▁').
+        # test_multi_word_mix only put byte words last, so it missed this transition.
+        analyses = {
+            "ev": {"parsed": True, "morphemes": [{"chunk": "ev"}]},
+            "geldi": {"parsed": True, "morphemes": [{"chunk": "gel"}, {"chunk": "di"}]},
+        }
+        _install_fake_tr_api(monkeypatch, analyses=analyses)
+        freqs = collections.Counter(
+            {MORPH_SEP + "ev": 100, MORPH_SEP + "gel": 80, "di": 60}
+        )
+        tok = _build(
+            tmp_path,
+            piece_freqs=freqs,
+            byte_merges=[("i", "P")],
+            vocab_size=_FIRST_MORPH_ID + 1 + 3,
+        )
+        for text in ("iPhone ev", "🎉 geldi", "iPhone ev geldi 🎉 ev", "café ev"):
+            assert tok.decode(tok.encode(text)) == text
+
     def test_round_trips_multibyte_turkish_via_byte_bpe(self, tmp_path, monkeypatch):
         # "ışığı" lowercases to itself but is OOV (no ▁ışığı in vocab) -> byte-BPE, exact.
         word = "ışığı"

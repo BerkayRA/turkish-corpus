@@ -50,12 +50,22 @@ from turkish_corpus.morpheme_tokenizer import (  # noqa: E402
 
 
 def _train_byte_merges(
-    surface_freqs: collections.Counter[str], num_merges: int
+    surface_freqs: collections.Counter[str], num_merges: int, *, train_cap: int = 40_000
 ) -> list[tuple[str, str]]:
-    """Train byte-level BPE merges over GPT-2 byte-chars of the surface-word frequencies."""
+    """Train byte-level BPE merges over GPT-2 byte-chars of the surface-word frequencies.
+
+    The pure-Python BPE trainer is O(distinct_pairs) per merge, and byte-char sequences are
+    long (≈1 symbol per byte), so training over ALL unique surfaces is intractable (hours).
+    Frequent byte-patterns dominate the merges, so we train on the top ``train_cap`` surfaces
+    by frequency — this captures essentially the same merges in minutes (40k surfaces / 16k
+    merges ≈ 19 min vs hours uncapped). ``train_cap<=0`` uses all surfaces.
+    """
     byte_map = bytes_to_unicode()
+    items = (
+        surface_freqs.most_common(train_cap) if train_cap > 0 else surface_freqs.items()
+    )
     word_symbols: dict[tuple[str, ...], int] = {}
-    for surface, freq in surface_freqs.items():
+    for surface, freq in items:
         symbols = tuple(byte_map[b] for b in surface.encode("utf-8"))
         if symbols:
             word_symbols[symbols] = word_symbols.get(symbols, 0) + freq
@@ -68,6 +78,7 @@ def build(
     *,
     vocab_size: int = 64000,
     byte_merges: int = 16000,
+    byte_train_cap: int = 40_000,
     table_top_n: int = 1_000_000,
 ) -> tuple[MorphemeTokenizer, dict]:
     """Assemble a MorphemeTokenizer + its fast table from a morph-segmented corpus.
@@ -101,7 +112,9 @@ def build(
                     surface_pieces[surface] = pieces  # BARE pieces; fusion at encode time.
                 n_tokens += 1
 
-    learned_byte_merges = _train_byte_merges(surface_freqs, byte_merges)
+    learned_byte_merges = _train_byte_merges(
+        surface_freqs, byte_merges, train_cap=byte_train_cap
+    )
 
     tokenizer = MorphemeTokenizer.build(
         merges_path=merges_path,
@@ -141,6 +154,12 @@ def main(argv: list[str] | None = None) -> int:
         default=16000,
         help="byte-level BPE merges to train for the OOV fallback",
     )
+    ap.add_argument(
+        "--byte-train-cap",
+        type=int,
+        default=40_000,
+        help="train byte-BPE on the top-N surfaces by frequency (0 = all; capped for speed)",
+    )
     ap.add_argument("--table-top-n", type=int, default=1_000_000)
     args = ap.parse_args(argv)
 
@@ -149,6 +168,7 @@ def main(argv: list[str] | None = None) -> int:
         args.merges,
         vocab_size=args.vocab_size,
         byte_merges=args.byte_merges,
+        byte_train_cap=args.byte_train_cap,
         table_top_n=args.table_top_n,
     )
     tokenizer.save(args.output)

@@ -484,19 +484,23 @@ class MorphemeTokenizer:
             if not isinstance(piece, str):
                 continue
 
+            # A ``▁``-prefixed piece is ALWAYS a word-initial morpheme piece: byte-BPE pieces
+            # are GPT-2 byte-chars and can never contain ``▁`` (U+2581), so this reliably ends
+            # any byte-BPE word in progress and opens a new morpheme word.
+            if piece.startswith(self.morph_sep):
+                flush()
+                morph_word = [piece[len(self.morph_sep) :]]
+                continue
+
             if byte_chars is not None:
-                # Inside a byte-BPE word: a str piece here is a byte-BPE merge piece (byte-chars).
+                # Inside a byte-BPE word: a bare str piece is a byte-BPE merge piece (byte-chars).
                 byte_chars.extend(piece)
                 continue
 
-            # A morpheme piece.
-            if piece.startswith(self.morph_sep):
-                flush()  # ▁ piece starts a new morpheme word
-                morph_word = [piece[len(self.morph_sep) :]]
-            else:
-                if morph_word is None:
-                    morph_word = []
-                morph_word.append(piece)
+            # A bare morpheme piece continues the current morpheme word.
+            if morph_word is None:
+                morph_word = []
+            morph_word.append(piece)
 
         flush()
         return " ".join(words)
