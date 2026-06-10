@@ -43,6 +43,7 @@ __all__ = [
     "nfc",
     "turkish_lower",
     "turkish_upper",
+    "turkish_title",
     "normalize_for_dedup",
     "normalize_text",
     "fix_encoding",
@@ -104,6 +105,20 @@ def turkish_upper(text: str, *, use_icu: bool = False) -> str:
     if use_icu:
         return _icu_case(text, lower=False)
     return text.translate(_TR_UPPER_MAP).upper()
+
+
+def turkish_title(text: str, *, use_icu: bool = False) -> str:
+    """Title-case ``text`` using Turkish (``tr``) rules: first char upper, rest lower.
+
+    Unlike ``str.title()`` (which would mangle ``ışık`` via the dotless/dotted-i rules and
+    title-case every word), this upper-cases only the FIRST character with Turkish casing and
+    lower-cases the remainder, so ``"istanbul" -> "İstanbul"`` and ``"ışık" -> "Işık"``. Empty
+    input is returned unchanged. Intended for single surface words (the casing-marker scheme),
+    not multi-word sentences.
+    """
+    if not text:
+        return text
+    return turkish_upper(text[0], use_icu=use_icu) + turkish_lower(text[1:], use_icu=use_icu)
 
 
 def normalize_for_dedup(text: str, *, use_icu: bool = False) -> str:

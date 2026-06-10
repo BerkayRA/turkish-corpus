@@ -14,6 +14,7 @@ from .normalization import (
     normalize_for_dedup,
     normalize_text,
     turkish_lower,
+    turkish_title,
     turkish_upper,
 )
 from .pii import RedactionResult, redact_turkish_pii, validate_tc_kimlik, validate_tr_iban
@@ -25,6 +26,7 @@ __all__ = [
     "nfc",
     "turkish_lower",
     "turkish_upper",
+    "turkish_title",
     "normalize_for_dedup",
     "normalize_text",
     "redact_turkish_pii",

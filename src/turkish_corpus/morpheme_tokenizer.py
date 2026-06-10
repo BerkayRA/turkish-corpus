@@ -1,45 +1,75 @@
-"""Production morpheme-BPE tokenizer: integer vocabulary, encode/decode, byte-fallback.
+"""Production morpheme-BPE tokenizer: integer vocabulary, lossless encode/decode, byte-BPE.
 
 This turns the fertility-only :class:`turkish_corpus.morpheme_bpe.MorphemeBPE` (which only
 emits piece *strings*) into a real LLM tokenizer that an embedding table can consume: a
-fixed-size integer vocabulary, ``encode(text) -> list[int]`` / ``decode(ids) -> str``,
-total coverage via byte-fallback, and an optional precomputed ``word -> pieces`` lookup
-table so the hot path never touches the slow ``tr_api`` analyzer.
+fixed-size integer vocabulary, ``encode(text) -> list[int]`` / ``decode(ids) -> str``, total
+coverage via a GPT-2-style **byte-level BPE** fallback, **casing markers** that preserve
+case, and an optional precomputed ``word -> pieces`` lookup table so the hot path never
+touches the slow ``tr_api`` analyzer.
 
-Why this module exists
-----------------------
-``MorphemeBPE`` is the project's best/most-unique tokenizer (held-out fertility 1.158,
-morpheme-aligned by construction) but cannot train or serve an LLM: it has no vocab/ids, no
-word-boundary handling, no OOV coverage, and needs a ~500-700 words/sec ``tr_api`` analysis
-per word. :class:`MorphemeTokenizer` adds exactly those missing layers on top of the proven
-merge engine without re-implementing it.
+Why this module changed (held-out validation findings)
+------------------------------------------------------
+Two deployability flaws were found against real web text:
 
-Vocabulary layout (fixed-size, default 64000)
----------------------------------------------
-Integer ids are assigned in a fixed order so the layout is stable and reproducible:
+1. **Raw-byte fallback exploded fertility.** ~1/3 of web words don't parse cleanly into known
+   morpheme pieces; the old raw-byte fallback spent ~10 byte tokens per such word (47% of all
+   tokens were single bytes), so *real* fertility was 2.056 vs an idealized 1.082. The fix is
+   a **byte-level BPE** fallback: rare/unparsed words cost a few sub-word tokens, not ~10 raw
+   bytes, while still giving total, exact-bytes coverage.
+2. **Round-trip was lossy.** The analyzer lowercases and drops apostrophes, so
+   ``"Türkiye'de" -> "türkiyede"`` and casing was lost. The fix is a **casing-marker scheme**
+   plus a **fidelity check**: any word that does not cleanly + losslessly morpheme-encode is
+   routed to the byte-BPE on its ORIGINAL surface, guaranteeing ``decode(encode(x)) == x``.
 
-* ``0..4``   — specials: PAD, UNK, BOS, EOS, WORD_BOUNDARY. WORD_BOUNDARY is the ``▁``
-  "preceded-by-space" marker emitted before every word (so decode can re-insert spaces).
-* ``5..260`` — the 256 byte tokens, one per byte value ``0x00..0xFF``. These give *total*
-  coverage: any morpheme not in the vocab is encoded as its raw UTF-8 bytes, so the
-  tokenizer can represent (and round-trip) arbitrary text.
-* ``261..(vocab_size-1)`` — morpheme/merge PIECES, ranked by corpus frequency (most
-  frequent first), filling the remaining id space up to ``vocab_size``.
+Fused word-boundary scheme (SentencePiece / GPT style)
+------------------------------------------------------
+For a cleanly morpheme-encoded word the boundary is FUSED into the first piece: a word's bare
+pieces ``[p0, p1, ...]`` become ``["▁"+p0, p1, ...]``. ``"▁ev"`` / ``"▁gel"`` carry the
+boundary, so the common-case token count is exactly the sum of pieces per word (no ``+1`` per
+word), preserving morpheme_bpe's fertility advantage. The segmentation table stays
+VOCAB-AGNOSTIC (it stores BARE pieces); fusion happens in :meth:`encode`.
 
-Special and byte tokens cannot collide with real morpheme pieces because they are keyed
-internally by sentinel tuples (``("<special>", name)`` / ``("<byte>", value)``), never by a
-plain string, while morpheme pieces are keyed by their plain ``str`` surface. ``piece_to_id``
-maps both the sentinel tuples and the morpheme strings to ids; ``id_to_piece`` is the inverse
-list (sentinel tuple for specials/bytes, ``str`` for morphemes).
+Casing markers
+--------------
+The morpheme analyzer works on the LOWERCASED word, so casing is restored with two special
+markers emitted *before* the word's morpheme ids: ``CAP`` (word is Titlecase, e.g. ``Ankara``)
+and ``UPPER`` (word is ALLCAPS, e.g. ``TÜRKİYE``). Lowercase words emit no marker. MIXED-case
+words (e.g. ``iPhone``) cannot be expressed by a single marker, so they take the byte-BPE path
+on the original surface. Casing uses Turkish-aware rules (``ı``/``İ``/``i``/``I``).
+
+Byte-level BPE fallback (total, lossless coverage)
+--------------------------------------------------
+A word that is MIXED-case, or whose morpheme pieces fail the fidelity check (don't concatenate
+back to the lowercased form, or contain an OOV piece — e.g. an apostrophe the analyzer
+dropped), is emitted as ``[WORD_BOUNDARY] + byte-BPE(original surface)``. Byte-BPE maps each
+UTF-8 byte to a distinct printable unicode char (the GPT-2 ``bytes_to_unicode`` bijection),
+applies learned byte merges, and maps the resulting byte-char pieces to ids. Every byte-char
+is always in the vocab (256 base tokens), so this NEVER fails and reproduces the exact bytes.
+There is no raw single-byte path for OOV morpheme pieces anymore.
+
+Vocabulary layout (fixed-size, default 64000), in id order
+----------------------------------------------------------
+* ``0`` PAD, ``1`` UNK, ``2`` BOS, ``3`` EOS — standard specials.
+* ``4`` WORD_BOUNDARY — precedes a byte-BPE word (the fallback path).
+* ``5`` CAP, ``6`` UPPER — casing markers for the following morpheme word.
+* ``7..262`` — the 256 byte-char tokens (one per byte value, GPT-2 ``bytes_to_unicode``).
+* ``263..(263 + n_byte_merges - 1)`` — byte-BPE merge pieces (byte-char strings), in merge
+  rank order.
+* ``(263 + n_byte_merges)..(vocab_size-1)`` — morpheme/merge PIECES, frequency-ranked: both
+  ``▁``-prefixed word-initial forms and bare word-internal forms.
+
+Specials and byte-chars are keyed internally by sentinel tuples (``("<special>", name)`` /
+``("<byte>", value)``) so they can never collide with a real ``str`` piece — even though a
+byte-char and a morpheme piece could in principle be the same string, their ids are kept
+distinct (byte-chars via the sentinel, byte-BPE/morpheme pieces via their plain ``str`` key).
 
 Round-trip guarantee
 --------------------
-``decode(encode(text))`` reconstructs the surface text for whitespace-normalized input: words
-are re-joined with single spaces, in-word pieces are concatenated, and byte-token runs are
-decoded back to their UTF-8 string. The leading WORD_BOUNDARY (before the first word) is
-stripped so there is no spurious leading space. Input is assumed already
-whitespace-normalized by the upstream corpus pipeline — this tokenizer does NOT re-normalize
-(NFC, casing, etc.); it only splits on whitespace.
+``decode(encode(text)) == text`` for ANY input whose words are whitespace-separated: every
+word is either (a) cleanly morpheme-encoded with an optional casing marker — and only when the
+fidelity check confirms the pieces concatenate back to the lowercased form and are all in
+vocab — or (b) byte-BPE'd from the exact original surface. Whitespace is normalized to single
+spaces between words (this tokenizer splits on whitespace and does not otherwise re-normalize).
 """
 
 from __future__ import annotations
@@ -50,6 +80,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from .morpheme_bpe import MorphemeBPE
+from .normalization import turkish_lower, turkish_title, turkish_upper
 
 if TYPE_CHECKING:
     import collections
@@ -58,113 +89,149 @@ __all__ = [
     "MorphemeTokenizer",
     "DEFAULT_VOCAB_SIZE",
     "MORPH_SEP",
+    "bytes_to_unicode",
 ]
 
 # Within-word morpheme separator carried in the merges file / used to serialize the table.
 # Matches turkish_corpus.morph_segment.MORPH_SEP and the merges file's "morph_sep" key.
 MORPH_SEP = "▁"
 
-# Default fixed vocabulary size (specials + 256 bytes + morpheme pieces).
+# Default fixed vocabulary size (specials + 256 byte-chars + byte-BPE pieces + morpheme pieces).
 DEFAULT_VOCAB_SIZE = 64_000
 
 # Words longer than this are junk (URLs / concatenated run-ons) that blow up tr_api's chart
-# parser; treat them as a single piece (byte-fallback at id time). Matches morph_segment.
+# parser; route them to the byte-BPE fallback. Matches morph_segment.
 MAX_WORD_LEN = 70
 
 # Default per-word lru_cache size for the (slow) analyzer path. Covers ~96% of tokens by
-# frequency for Turkish text; bounds memory for long-running serving. Mirrors the counter.
+# frequency for Turkish text; bounds memory for long-running serving.
 DEFAULT_CACHE_SIZE = 1_000_000
 
-# Ordered special-token names; their ids are their index (PAD=0 ... WORD_BOUNDARY=4). The
-# WORD_BOUNDARY marker is emitted before each word so decode can re-insert word spacing.
-_SPECIAL_NAMES = ("PAD", "UNK", "BOS", "EOS", "WORD_BOUNDARY")
+# Ordered special-token names; their ids are their index. WORD_BOUNDARY precedes a byte-BPE
+# word; CAP/UPPER are casing markers for the following morpheme word.
+_SPECIAL_NAMES = ("PAD", "UNK", "BOS", "EOS", "WORD_BOUNDARY", "CAP", "UPPER")
 
-# Number of byte tokens (one per possible byte value).
+# Number of byte-char tokens (one per possible byte value).
 _N_BYTES = 256
 
-# Sentinel piece-key prefixes so specials/bytes can live in piece_to_id without ever
-# colliding with a real morpheme string key (a tuple is never equal to a str).
+# Sentinel piece-key prefixes so specials/byte-chars can live in piece_to_id without colliding
+# with a real ``str`` piece key (a tuple is never equal to a str).
 _SPECIAL_TAG = "<special>"
 _BYTE_TAG = "<byte>"
 
 # On-disk format version for tokenizer.json.
-_FORMAT_VERSION = 1
+_FORMAT_VERSION = 2
 
 # Filenames written by save() / read by load().
 _TOKENIZER_FILE = "tokenizer.json"
 _TABLE_FILE = "table.tsv"
 
 
+@functools.lru_cache(maxsize=1)
+def bytes_to_unicode() -> dict[int, str]:
+    """The GPT-2 byte<->unicode bijection: each of 256 byte values -> a distinct printable char.
+
+    Reversible (and injective): printable ASCII-range bytes map to themselves; the remaining
+    bytes map to codepoints starting at U+0100, so no byte-char is whitespace or a control
+    character (which keeps byte-BPE pieces safe to store in a TSV and to split on). This is the
+    standard GPT-2 mapping (Radford et al.), reproduced exactly so byte-BPE merges trained the
+    same way are interchangeable.
+    """
+    bs = (
+        list(range(ord("!"), ord("~") + 1))
+        + list(range(ord("¡"), ord("¬") + 1))
+        + list(range(ord("®"), ord("ÿ") + 1))
+    )
+    cs = list(bs)
+    n = 0
+    for b in range(2**8):
+        if b not in bs:
+            bs.append(b)
+            cs.append(2**8 + n)
+            n += 1
+    return {b: chr(c) for b, c in zip(bs, cs, strict=True)}
+
+
+def _unicode_to_bytes() -> dict[str, int]:
+    """Inverse of :func:`bytes_to_unicode`: byte-char -> byte value."""
+    return {char: value for value, char in bytes_to_unicode().items()}
+
+
 class MorphemeTokenizer:
-    """Morpheme-BPE tokenizer with an integer vocabulary, byte-fallback, and a fast table.
+    """Morpheme-BPE tokenizer with integer vocab, casing markers, and a byte-BPE fallback.
 
     Wraps the pure :class:`MorphemeBPE` merge engine (the proven, unit-tested merge loop) with
-    everything an LLM needs: a fixed-size integer vocabulary, ``encode``/``decode`` over ids,
-    total coverage via byte-fallback for OOV morphemes, optional BOS/EOS, and an optional
-    precomputed ``word -> pieces`` table so the hot path is a dict lookup instead of the slow
-    ``tr_api`` analysis.
+    everything an LLM needs: a fixed-size integer vocabulary, lossless ``encode``/``decode``
+    over ids, casing markers, a GPT-2-style byte-level BPE fallback for OOV/unparseable words
+    (total + exact coverage), optional BOS/EOS, and an optional precomputed ``word -> pieces``
+    table so the hot path is a dict lookup instead of the slow ``tr_api`` analysis.
 
-    Construct via :meth:`build` (from a piece-frequency Counter) or :meth:`load` (from a saved
-    directory) rather than directly; the ``__init__`` takes already-assembled vocab structures.
+    Construct via :meth:`build` (from frequencies + byte merges) or :meth:`load` (from a saved
+    directory) rather than directly; ``__init__`` takes already-assembled vocab structures.
 
     Parameters
     ----------
     bpe:
-        The merge engine (reconstructed from the merges list).
-    piece_to_id:
-        Maps each vocab entry to its integer id: sentinel tuples ``("<special>", name)`` and
-        ``("<byte>", value)`` for specials/bytes, plain ``str`` for morpheme pieces.
-    id_to_piece:
-        Inverse of ``piece_to_id`` as a list indexed by id (sentinel tuple or ``str``).
+        The morpheme merge engine (reconstructed from the morpheme merges list).
+    byte_bpe:
+        The byte-level merge engine (a second :class:`MorphemeBPE` over byte-char symbols; its
+        ``encode`` is symbol-agnostic so the same greedy lowest-rank logic applies to bytes).
+    piece_to_id / id_to_piece:
+        The vocabulary (see the module layout). Sentinel tuples for specials/byte-chars, plain
+        ``str`` for byte-BPE and morpheme pieces.
     morph_sep:
-        Within-word morpheme separator from the merges file (informational; pieces are stored
-        already merged).
-    merges:
-        The ordered merge pairs (kept so :meth:`save` can serialize them).
+        Within-word morpheme separator from the merges file.
+    merges / byte_merges:
+        The ordered morpheme / byte merge pairs (kept so :meth:`save` can serialize them).
     table:
-        Optional precomputed ``word -> piece strings`` map; when set, encoding a tabled word is
-        a dict lookup with no analyzer call.
+        Optional precomputed ``word -> piece strings`` map (BARE pieces, on the LOWERCASED
+        form); a tabled word is a dict lookup with no analyzer call.
     repo_path:
-        Optional path to the ``turkish-tokenizer`` clone for the lazy ``tr_api`` bridge. Only
-        used when a word is neither tabled nor cached, so :meth:`load` works without ``tr_api``.
+        Optional path to the ``turkish-tokenizer`` clone for the lazy ``tr_api`` bridge.
     cache_size:
-        Per-word ``lru_cache`` size for the analyzer fallback path (``None`` = unbounded,
-        ``0``/negative = disabled).
+        Per-word ``lru_cache`` size for the analyzer fallback path.
     """
 
     def __init__(
         self,
         bpe: MorphemeBPE,
+        byte_bpe: MorphemeBPE,
         piece_to_id: dict[str | tuple[str, str | int], int],
         id_to_piece: list[str | tuple[str, str | int]],
         *,
         morph_sep: str = MORPH_SEP,
         merges: list[tuple[str, str]] | None = None,
+        byte_merges: list[tuple[str, str]] | None = None,
         table: dict[str, list[str]] | None = None,
         repo_path: str | None = None,
         cache_size: int | None = DEFAULT_CACHE_SIZE,
     ) -> None:
         self._bpe = bpe
+        self._byte_bpe = byte_bpe
         self.piece_to_id = piece_to_id
         self.id_to_piece = id_to_piece
         self.morph_sep = morph_sep
         self._merges = list(merges) if merges is not None else []
+        self._byte_merges = list(byte_merges) if byte_merges is not None else []
         self._table: dict[str, list[str]] = dict(table) if table is not None else {}
         self._repo_path = repo_path
 
-        # Special-token ids by name (PAD=0 ... WORD_BOUNDARY=4) for fast access in encode/decode.
+        # Special-token ids by name for fast access in encode/decode.
         self._special_ids: dict[str, int] = {
             name: piece_to_id[(_SPECIAL_TAG, name)] for name in _SPECIAL_NAMES
         }
-        # First byte-token id; byte value v -> id (byte_offset + v). Stored to decode runs.
+        # First byte-char-token id; byte value v -> id (byte_offset + v). Stored to decode runs.
         self._byte_offset: int = piece_to_id[(_BYTE_TAG, 0)]
+
+        # The GPT-2 byte<->unicode maps (byte-char -> id is via piece_to_id sentinel keys).
+        self._byte_to_unicode = bytes_to_unicode()
+        self._unicode_to_byte = _unicode_to_bytes()
 
         # The tr_api Tokenizer is built lazily on first analyzer use (so load() needs no repo).
         self._tokenizer = None
 
         # Per-word memoization of the analyzer path (the bottleneck). The table is checked
-        # first, so this only memoizes non-tabled words. Bound to the instance so it is GC'd
-        # with the tokenizer; keyed only on the word (merges/table are fixed per instance).
+        # first, so this only memoizes non-tabled words.
         maxsize = cache_size if cache_size is None else max(int(cache_size), 0)
         self._cache_enabled = maxsize is None or maxsize > 0
         self._analyze_word_cached = (
@@ -177,22 +244,17 @@ class MorphemeTokenizer:
 
     @property
     def vocab_size(self) -> int:
-        """Total number of ids in the vocabulary (specials + bytes + morpheme pieces)."""
+        """Total number of ids in the vocabulary."""
         return len(self.id_to_piece)
 
     def token_to_id(self, piece: str) -> int | None:
-        """Id for a morpheme-piece *string* (specials/bytes use the sentinel keys instead)."""
+        """Id for a piece *string* (specials/byte-chars use the sentinel keys instead)."""
         return self.piece_to_id.get(piece)
 
     # --- Word -> pieces (the fast / cached analysis path) ----------------------------------
 
     def _ensure_tokenizer(self) -> None:
-        """Build the ``tr_api.Tokenizer`` lazily (only when an uncached/un-tabled word needs it).
-
-        Keeping this lazy is why :meth:`load` works without ``tr_api`` on ``sys.path``: pure
-        table/cache lookups never trigger it. Uses the fast config (suggestion / alternatives /
-        typo-repair passes disabled) like the rest of the project.
-        """
+        """Build the ``tr_api.Tokenizer`` lazily (only when an uncached/un-tabled word needs it)."""
         if self._tokenizer is not None:
             return
         from .morphology import ensure_tr_api_importable  # noqa: PLC0415  (lazy optional dep)
@@ -209,13 +271,12 @@ class MorphemeTokenizer:
         )
 
     def _analyze_word_uncached(self, word: str) -> tuple[str, ...]:
-        """Analyze one word with ``tr_api`` and apply the merges, as an immutable tuple.
+        """Analyze one (lowercased) word with ``tr_api`` and apply the merges, as a tuple.
 
         Mirrors :meth:`MorphemeBPETokenCounter._encode_word_uncached`: ``split_clitics=False``
-        keeps the flat ``{"morphemes": [...]}`` shape, fall back to ``[word]`` on a failed
-        parse, and any analyzer error / timeout degrades to ``[word]`` (byte-fallback at id
-        time) so a single bad word can never crash encoding. Returned immutable so the
-        lru_cache can safely share it.
+        keeps the flat ``{"morphemes": [...]}`` shape, falls back to ``[word]`` on a failed
+        parse, and any analyzer error degrades to ``[word]`` so a bad word can never crash
+        encoding. Returned immutable so the lru_cache can safely share it.
         """
         self._ensure_tokenizer()
         try:
@@ -237,106 +298,216 @@ class MorphemeTokenizer:
             morphs = [word]
         return tuple(self._bpe.encode(morphs))
 
-    def _word_pieces(self, word: str) -> list[str]:
-        """Piece strings for one word, fast-table first then the cached analyzer.
+    def _word_pieces(self, lowered: str) -> list[str]:
+        """BARE piece strings for one LOWERCASED word, fast-table first then cached analyzer.
 
-        Resolution order (cheapest first):
-
-        1. ``table`` hit  -> the precomputed pieces (no analyzer call at all).
-        2. ``len(word) > MAX_WORD_LEN`` -> a single piece (the word itself); byte-fallback at
-           id time. Matches ``morph_segment``: long tokens are junk that hang the chart parser.
-        3. otherwise the per-word ``lru_cache``-d ``tr_api`` analysis + merges.
+        Resolution order (cheapest first): table hit -> the precomputed pieces; otherwise the
+        per-word ``lru_cache``-d ``tr_api`` analysis + merges. (Over-long words never reach
+        here — :meth:`encode` routes them straight to the byte-BPE fallback.)
         """
-        tabled = self._table.get(word)
+        tabled = self._table.get(lowered)
         if tabled is not None:
             return list(tabled)
-        if len(word) > MAX_WORD_LEN:
-            return [word]
-        return list(self._analyze_word_cached(word))
+        return list(self._analyze_word_cached(lowered))
+
+    # --- Casing ----------------------------------------------------------------------------
+
+    def _casing_marker(self, surface: str, lowered: str) -> int | None | bool:
+        """Classify ``surface`` casing against its lowercase form.
+
+        Returns the CAP / UPPER special id (or ``None`` for lowercase) when the word can be
+        reconstructed from ``lowered`` + a single marker, or ``False`` for MIXED case (no
+        single marker recovers it -> caller must use the byte-BPE fallback).
+        """
+        if surface == lowered:
+            return None
+        if surface == turkish_title(lowered):
+            return self._special_ids["CAP"]
+        if surface == turkish_upper(lowered) and surface != lowered:
+            return self._special_ids["UPPER"]
+        return False
 
     # --- Encode ----------------------------------------------------------------------------
 
     def encode(self, text: str, *, add_bos: bool = False, add_eos: bool = False) -> list[int]:
-        """Encode whitespace-normalized ``text`` to a list of integer ids.
+        """Encode ``text`` to integer ids, guaranteeing ``decode(encode(text)) == text``.
 
-        Each whitespace-split word is prefixed with the WORD_BOUNDARY id, then each of its
-        pieces becomes either its vocab id (known morpheme) or, for an OOV morpheme, the
-        sequence of its UTF-8 byte-token ids (byte-fallback — so any morpheme is representable
-        and the text always round-trips). Optionally wrapped with BOS / EOS.
+        Splits on whitespace. For each surface word ``w``:
 
-        Input is assumed already normalized by the upstream corpus pipeline; this method only
-        splits on whitespace and does NOT re-normalize (no NFC / casing).
+        1. Lowercase ``lw = turkish_lower(w)`` and classify casing (lowercase / CAP / UPPER /
+           MIXED). MIXED, or an over-long word, goes straight to step 3.
+        2. Compute the BARE morpheme ``pieces`` of ``lw`` (table or cached analyzer) and fuse
+           the boundary into the first piece. FIDELITY CHECK: only if ``"".join(pieces) == lw``
+           AND every fused piece is in the morpheme vocab, emit ``[marker?] + [morph ids]``.
+        3. Otherwise emit ``[WORD_BOUNDARY] + byte-BPE(w)`` on the ORIGINAL surface ``w`` —
+           exact case + punctuation preserved, total coverage, never fails.
+
+        So the common case keeps morpheme_bpe's fertility (no per-word boundary token), while
+        any word the morpheme path can't represent losslessly falls back to a few byte-BPE
+        tokens. Optionally wrapped with BOS / EOS.
         """
         ids: list[int] = []
         if add_bos:
             ids.append(self._special_ids["BOS"])
 
-        wb = self._special_ids["WORD_BOUNDARY"]
         for word in text.split():
-            ids.append(wb)
-            for piece in self._word_pieces(word):
-                piece_id = self.piece_to_id.get(piece)
-                if piece_id is not None:
-                    ids.append(piece_id)
-                else:
-                    ids.extend(self._byte_ids(piece))
+            ids.extend(self._encode_word(word))
 
         if add_eos:
             ids.append(self._special_ids["EOS"])
         return ids
 
-    def _byte_ids(self, piece: str) -> list[int]:
-        """Byte-fallback: a piece's UTF-8 bytes as their byte-token ids (total coverage)."""
-        return [self._byte_offset + b for b in piece.encode("utf-8")]
+    def _encode_word(self, word: str) -> list[int]:
+        """Ids for a single surface word (morpheme path with casing marker, else byte-BPE)."""
+        lowered = turkish_lower(word)
+        marker = self._casing_marker(word, lowered)
+
+        # MIXED case, or junk-length: no clean morpheme path -> byte-BPE the original surface.
+        if marker is not False and len(word) <= MAX_WORD_LEN:
+            pieces = self._word_pieces(lowered)
+            morph_ids = self._try_morpheme_ids(pieces, lowered)
+            if morph_ids is not None:
+                prefix = [] if marker is None else [marker]
+                return prefix + morph_ids
+
+        # Fallback: byte-BPE on the ORIGINAL surface (preserves exact case + punctuation).
+        return [self._special_ids["WORD_BOUNDARY"], *self._byte_bpe_encode(word)]
+
+    def _try_morpheme_ids(self, pieces: list[str], lowered: str) -> list[int] | None:
+        """Morpheme ids for ``pieces`` if they pass the fidelity check, else ``None``.
+
+        Fidelity: the pieces must concatenate back to the lowercased form (no dropped
+        characters — e.g. an apostrophe) AND every fused piece must be in the morpheme vocab
+        (no OOV). Either failure returns ``None`` so the caller uses the byte-BPE fallback,
+        which is what guarantees losslessness.
+        """
+        if not pieces or "".join(pieces) != lowered:
+            return None
+        fused = [self.morph_sep + pieces[0], *pieces[1:]]
+        ids: list[int] = []
+        for piece in fused:
+            piece_id = self.piece_to_id.get(piece)
+            if piece_id is None:
+                return None
+            ids.append(piece_id)
+        return ids
+
+    def _byte_bpe_encode(self, surface: str) -> list[int]:
+        """Byte-level BPE of a surface string: UTF-8 -> byte-chars -> merges -> ids.
+
+        Every byte-char is always in the vocab (256 base byte tokens), so this NEVER fails and
+        preserves the exact bytes. Pieces are byte-char strings; word-initial pieces are NOT
+        ``▁``-fused (the WORD_BOUNDARY token already marks the boundary for byte-BPE words).
+        """
+        byte_chars = [self._byte_to_unicode[b] for b in surface.encode("utf-8")]
+        ids: list[int] = []
+        for piece in self._byte_bpe.encode(byte_chars):
+            piece_id = self.piece_to_id.get(piece)
+            if piece_id is not None:
+                ids.append(piece_id)
+            else:
+                # Merge piece not in vocab -> emit its constituent byte-char ids (always present).
+                for char in piece:
+                    ids.append(self._byte_offset + self._unicode_to_byte[char])
+        return ids
 
     # --- Decode ----------------------------------------------------------------------------
 
     def decode(self, ids: list[int]) -> str:
-        """Decode ids back to surface text, the inverse of :meth:`encode`.
+        """Decode ids back to surface text, the exact inverse of :meth:`encode`.
 
-        PAD / BOS / EOS / UNK are dropped. WORD_BOUNDARY separates words with a single space.
-        Morpheme pieces are concatenated within a word; runs of byte tokens are gathered and
-        decoded together as UTF-8 (``errors="replace"``) so a multi-byte character split across
-        byte tokens is reassembled correctly. The leading space from the first WORD_BOUNDARY is
-        stripped, so ``decode(encode(text)) == text`` for whitespace-normalized ``text``.
+        PAD / BOS / EOS / UNK are dropped. ``CAP`` / ``UPPER`` set a pending case applied to the
+        NEXT morpheme word when it flushes. A ``MORPH_SEP``-prefixed piece starts a new morpheme
+        word (``▁`` stripped; pending case applied + cleared on flush); bare morpheme pieces
+        concatenate onto the current morpheme word. ``WORD_BOUNDARY`` starts a new byte-BPE
+        word; following byte-char / byte-BPE pieces accumulate as byte-chars, then map back to
+        bytes and decode UTF-8 (``errors="replace"``). Words join with single spaces.
         """
-        out: list[str] = []
-        byte_run: list[int] = []
-
-        def flush_bytes() -> None:
-            if byte_run:
-                out.append(bytes(byte_run).decode("utf-8", errors="replace"))
-                byte_run.clear()
+        words: list[str] = []
+        morph_word: list[str] | None = None  # accumulating morpheme pieces, or None
+        byte_chars: list[str] | None = None  # accumulating byte-chars, or None
+        pending_case: str | None = None  # "CAP" / "UPPER" for the next morpheme word
 
         byte_end = self._byte_offset + _N_BYTES
         drop = {self._special_ids[name] for name in ("PAD", "BOS", "EOS", "UNK")}
         wb = self._special_ids["WORD_BOUNDARY"]
+        cap = self._special_ids["CAP"]
+        upper = self._special_ids["UPPER"]
+
+        def flush() -> None:
+            """Emit the in-progress word (if any), applying + clearing any pending case.
+
+            ``pending_case`` is cleared ONLY when a morpheme word is actually emitted, so a
+            marker set just before a ``▁`` piece survives the flush that opens the new word.
+            """
+            nonlocal morph_word, byte_chars, pending_case
+            if morph_word is not None:
+                word = "".join(morph_word)
+                if pending_case == "CAP":
+                    word = turkish_title(word)
+                elif pending_case == "UPPER":
+                    word = turkish_upper(word)
+                words.append(word)
+                morph_word = None
+                pending_case = None
+            elif byte_chars is not None:
+                raw = bytes(self._unicode_to_byte[c] for c in byte_chars)
+                words.append(raw.decode("utf-8", errors="replace"))
+                byte_chars = None
 
         for tid in ids:
-            if self._byte_offset <= tid < byte_end:
-                byte_run.append(tid - self._byte_offset)
-                continue
-            flush_bytes()  # a non-byte token ends any in-progress byte run.
             if tid in drop:
                 continue
-            if tid == wb:
-                out.append(" ")
+            if tid == cap:
+                flush()
+                pending_case = "CAP"
                 continue
-            piece = self.id_to_piece[tid] if 0 <= tid < len(self.id_to_piece) else None
-            if isinstance(piece, str):
-                out.append(piece)
-        flush_bytes()  # trailing byte run.
+            if tid == upper:
+                flush()
+                pending_case = "UPPER"
+                continue
+            if tid == wb:
+                flush()
+                pending_case = None  # byte-BPE words carry their own case; drop any stray marker
+                byte_chars = []  # a byte-BPE word begins
+                continue
 
-        return "".join(out).lstrip(" ")
+            # A byte-char token: part of the current byte-BPE word.
+            if self._byte_offset <= tid < byte_end:
+                if byte_chars is None:  # defensive: byte-char without a WORD_BOUNDARY
+                    flush()
+                    byte_chars = []
+                byte_chars.append(self._byte_to_unicode[tid - self._byte_offset])
+                continue
+
+            piece = self.id_to_piece[tid] if 0 <= tid < len(self.id_to_piece) else None
+            if not isinstance(piece, str):
+                continue
+
+            if byte_chars is not None:
+                # Inside a byte-BPE word: a str piece here is a byte-BPE merge piece (byte-chars).
+                byte_chars.extend(piece)
+                continue
+
+            # A morpheme piece.
+            if piece.startswith(self.morph_sep):
+                flush()  # ▁ piece starts a new morpheme word
+                morph_word = [piece[len(self.morph_sep) :]]
+            else:
+                if morph_word is None:
+                    morph_word = []
+                morph_word.append(piece)
+
+        flush()
+        return " ".join(words)
 
     # --- Fast table ------------------------------------------------------------------------
 
     def set_table(self, table: dict[str, list[str]]) -> None:
         """Install a precomputed ``word -> piece strings`` table (replaces any existing one).
 
-        Stored as piece *strings* (not ids) so a later vocab change does not invalidate the
-        table — the hot path is the dict lookup, with id resolution / byte-fallback applied at
-        encode time against the current vocab.
+        Keyed by the LOWERCASED word and stored as BARE piece *strings* so a vocab change does
+        not invalidate it; id resolution / fidelity check / fallback are applied at encode time.
         """
         self._table = dict(table)
 
@@ -359,23 +530,27 @@ class MorphemeTokenizer:
     def save(self, directory: str) -> None:
         """Write ``tokenizer.json`` (and ``table.tsv`` if a table is set) to ``directory``.
 
-        ``tokenizer.json`` carries everything needed to reconstruct the vocab and merge engine:
-        the format version, vocab size, ``morph_sep``, the ordered ``merges``, the special-token
-        ids, the byte-token offset, and the ordered morpheme ``pieces`` (id 261.. in order).
-        Specials and bytes are NOT listed in ``pieces`` — their ids are fixed by the layout and
-        rebuilt deterministically on :meth:`load`.
+        ``tokenizer.json`` carries everything needed to reconstruct both merge engines and the
+        vocab: format version, vocab size, ``morph_sep``, the ordered morpheme ``merges`` and
+        ``byte_bpe_merges``, the special ids, the byte-char offset, ``n_byte_merges``, the
+        byte-BPE pieces, and the ordered morpheme ``pieces``. Specials and byte-chars are NOT
+        listed (their ids are fixed by the layout and rebuilt deterministically on :meth:`load`).
         """
         out_dir = Path(directory)
         out_dir.mkdir(parents=True, exist_ok=True)
 
+        byte_pieces, morph_pieces = self._ordered_pieces()
         spec = {
             "version": _FORMAT_VERSION,
             "vocab_size": self.vocab_size,
             "morph_sep": self.morph_sep,
             "merges": [list(pair) for pair in self._merges],
+            "byte_bpe_merges": [list(pair) for pair in self._byte_merges],
             "specials": dict(self._special_ids),
             "byte_offset": self._byte_offset,
-            "pieces": self._ordered_morpheme_pieces(),
+            "n_byte_merges": len(byte_pieces),
+            "byte_pieces": byte_pieces,
+            "pieces": morph_pieces,
         }
         (out_dir / _TOKENIZER_FILE).write_text(
             json.dumps(spec, ensure_ascii=False), encoding="utf-8"
@@ -384,10 +559,16 @@ class MorphemeTokenizer:
         if self._table:
             _write_table(out_dir / _TABLE_FILE, self._table, self.morph_sep)
 
-    def _ordered_morpheme_pieces(self) -> list[str]:
-        """The morpheme pieces in id order (id 261.. ), excluding specials and byte tokens."""
+    def _ordered_pieces(self) -> tuple[list[str], list[str]]:
+        """``(byte_bpe_pieces, morpheme_pieces)`` in id order (after specials + byte-chars).
+
+        The byte-BPE section runs for ``len(byte_merges)`` ids; the remainder are morpheme
+        pieces. Both are plain ``str`` (the byte-char base tokens are sentinel-keyed, not here).
+        """
         first = self._byte_offset + _N_BYTES
-        return [piece for piece in self.id_to_piece[first:] if isinstance(piece, str)]
+        tail = [p for p in self.id_to_piece[first:] if isinstance(p, str)]
+        n_byte = len(self._byte_merges)
+        return tail[:n_byte], tail[n_byte:]
 
     @classmethod
     def load(
@@ -399,17 +580,20 @@ class MorphemeTokenizer:
     ) -> MorphemeTokenizer:
         """Reconstruct a tokenizer saved by :meth:`save`.
 
-        Rebuilds the :class:`MorphemeBPE` engine from the stored merges, restores the full
-        vocabulary deterministically from the layout + stored ``pieces``, and loads ``table.tsv``
-        if present. The ``tr_api`` bridge is set up lazily (only on the first uncached /
-        un-tabled word), so ``load`` itself never requires ``tr_api`` on ``sys.path``.
+        Rebuilds both the morpheme and byte :class:`MorphemeBPE` engines from the stored merges,
+        restores the full vocabulary deterministically from the layout + stored byte-BPE and
+        morpheme pieces, and loads ``table.tsv`` if present. ``tr_api`` is set up lazily.
         """
         in_dir = Path(directory)
         spec = json.loads((in_dir / _TOKENIZER_FILE).read_text(encoding="utf-8"))
 
         merges = [tuple(pair) for pair in spec["merges"]]
+        byte_merges = [tuple(pair) for pair in spec.get("byte_bpe_merges", [])]
         bpe = MorphemeBPE(merges)
-        piece_to_id, id_to_piece = _build_vocab(spec["pieces"])
+        byte_bpe = MorphemeBPE(byte_merges)
+        piece_to_id, id_to_piece = _build_vocab(
+            spec.get("byte_pieces", []), spec["pieces"]
+        )
 
         table = None
         table_path = in_dir / _TABLE_FILE
@@ -418,10 +602,12 @@ class MorphemeTokenizer:
 
         return cls(
             bpe,
+            byte_bpe,
             piece_to_id,
             id_to_piece,
             morph_sep=spec.get("morph_sep", MORPH_SEP),
             merges=merges,
+            byte_merges=byte_merges,
             table=table,
             repo_path=repo_path,
             cache_size=cache_size,
@@ -435,82 +621,92 @@ class MorphemeTokenizer:
         *,
         merges_path: str,
         piece_freqs: collections.Counter[str],
+        byte_merges: list[tuple[str, str]],
         vocab_size: int = DEFAULT_VOCAB_SIZE,
         table: dict[str, list[str]] | None = None,
         repo_path: str | None = None,
         cache_size: int | None = DEFAULT_CACHE_SIZE,
     ) -> MorphemeTokenizer:
-        """Assemble a tokenizer from merges + a piece-frequency Counter (pure, unit-testable).
+        """Assemble a tokenizer from morpheme merges + a piece Counter + byte-BPE merges.
 
-        The vocabulary is built deterministically:
+        The vocabulary is built deterministically in the layout order: specials, the 256
+        byte-char tokens, the ``byte_merges`` pieces (byte-char strings), then the most-frequent
+        morpheme pieces filling the remaining id space up to ``vocab_size``.
 
-        * specials at ids 0..4, the 256 byte tokens at 5..260;
-        * the remaining id space (261..vocab_size-1) filled with the most-frequent morpheme
-          pieces from ``piece_freqs`` (ties broken by piece string, for reproducibility).
-
-        Corpus iteration / ``tr_api`` segmentation are deliberately kept OUT of this method —
-        the build script computes ``piece_freqs`` (and optionally the ``word -> pieces`` table)
-        and passes them in, so this stays pure and testable with a synthetic Counter.
+        Corpus iteration / ``tr_api`` segmentation / byte-merge *training* are kept OUT of this
+        method — the build script computes ``piece_freqs``, ``byte_merges`` (and optionally the
+        table) and passes them in, so this stays pure and testable.
 
         Parameters
         ----------
         merges_path:
-            Path to a ``morpheme_bpe_<V>.json`` (the merge engine + ``morph_sep``).
+            Path to a ``morpheme_bpe_<V>.json`` (the morpheme merge engine + ``morph_sep``).
         piece_freqs:
-            ``piece string -> corpus frequency``; the most common fill the post-byte id space.
+            ``piece string -> corpus frequency``; the most common fill the post-byte-BPE space.
+        byte_merges:
+            Learned byte-level BPE merges (ordered ``(a, b)`` byte-char pairs). Reconstructs the
+            byte merge engine; each merge also gets a vocab id (one piece per merge).
         vocab_size:
-            Total fixed vocabulary size (must leave room for specials + 256 byte tokens).
+            Total fixed vocabulary size. Must leave room for at least one morpheme piece after
+            the specials + 256 byte-chars + ``len(byte_merges)`` byte-BPE pieces, else ValueError.
         table:
-            Optional precomputed ``word -> piece strings`` fast table.
+            Optional precomputed ``word -> piece strings`` fast table (lowercased keys).
         """
-        first_piece_id = len(_SPECIAL_NAMES) + _N_BYTES
-        if vocab_size <= first_piece_id:
+        n_byte_merges = len(byte_merges)
+        first_morph_id = len(_SPECIAL_NAMES) + _N_BYTES + n_byte_merges
+        if vocab_size <= first_morph_id:
             raise ValueError(
-                f"vocab_size={vocab_size} too small: needs > {first_piece_id} to leave room "
-                f"for {len(_SPECIAL_NAMES)} specials + {_N_BYTES} byte tokens."
+                f"vocab_size={vocab_size} too small: needs > {first_morph_id} to leave room "
+                f"for {len(_SPECIAL_NAMES)} specials + {_N_BYTES} byte-chars + "
+                f"{n_byte_merges} byte-BPE pieces, with at least one morpheme piece."
             )
 
         data = json.loads(Path(merges_path).read_text(encoding="utf-8"))
         merges = [tuple(m) for m in data["merges"]]
         morph_sep = data.get("morph_sep", MORPH_SEP)
         bpe = MorphemeBPE(merges)
+        byte_bpe = MorphemeBPE(list(byte_merges))
 
-        n_pieces = vocab_size - first_piece_id
-        ordered_pieces = _rank_pieces(piece_freqs, n_pieces)
-        piece_to_id, id_to_piece = _build_vocab(ordered_pieces)
+        # Byte-BPE pieces are the merged byte-char strings, in merge-rank order.
+        byte_pieces = [a + b for a, b in byte_merges]
+
+        n_morph = vocab_size - first_morph_id
+        morph_pieces = _rank_pieces(piece_freqs, n_morph)
+        piece_to_id, id_to_piece = _build_vocab(byte_pieces, morph_pieces)
 
         return cls(
             bpe,
+            byte_bpe,
             piece_to_id,
             id_to_piece,
             morph_sep=morph_sep,
             merges=merges,
+            byte_merges=list(byte_merges),
             table=table,
             repo_path=repo_path,
             cache_size=cache_size,
         )
 
 
-# --- Pure vocab / table helpers (no I/O of the tokenizer's own concern) ---------------------
+# --- Pure vocab / table helpers ------------------------------------------------------------
 
 
 def _rank_pieces(piece_freqs: collections.Counter[str], n: int) -> list[str]:
-    """The top-``n`` pieces by frequency (descending), ties broken by piece string.
-
-    Frequency-then-string ordering makes the assigned ids reproducible for a given Counter,
-    independent of insertion order.
-    """
+    """The top-``n`` pieces by frequency (descending), ties broken by piece string."""
     ranked = sorted(piece_freqs.items(), key=lambda kv: (-kv[1], kv[0]))
     return [piece for piece, _freq in ranked[:n]]
 
 
 def _build_vocab(
-    ordered_pieces: list[str],
+    byte_pieces: list[str],
+    morph_pieces: list[str],
 ) -> tuple[dict[str | tuple[str, str | int], int], list[str | tuple[str, str | int]]]:
-    """Build ``(piece_to_id, id_to_piece)`` for the fixed layout + given ordered morpheme pieces.
+    """Build ``(piece_to_id, id_to_piece)`` for the fixed layout.
 
-    Layout: specials 0..4 (sentinel ``("<special>", name)``), byte tokens 5..260 (sentinel
-    ``("<byte>", value)``), then ``ordered_pieces`` from 261 onward (plain ``str``).
+    Layout: specials (sentinel ``("<special>", name)``), 256 byte-char tokens (sentinel
+    ``("<byte>", value)``), then ``byte_pieces`` (byte-BPE merge strings), then ``morph_pieces``
+    (morpheme strings) — the last two as plain ``str`` keys. A duplicate ``str`` piece is kept
+    at its first (highest-rank) id.
     """
     id_to_piece: list[str | tuple[str, str | int]] = []
     piece_to_id: dict[str | tuple[str, str | int], int] = {}
@@ -523,8 +719,10 @@ def _build_vocab(
         append((_SPECIAL_TAG, name))
     for value in range(_N_BYTES):
         append((_BYTE_TAG, value))
-    for piece in ordered_pieces:
-        # Skip a morpheme piece that would shadow nothing but is a dup (keep first/highest rank).
+    for piece in byte_pieces:
+        if piece not in piece_to_id:
+            append(piece)
+    for piece in morph_pieces:
         if piece not in piece_to_id:
             append(piece)
 

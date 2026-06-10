@@ -14,6 +14,7 @@ from turkish_corpus.normalization import (
     normalize_for_dedup,
     normalize_text,
     turkish_lower,
+    turkish_title,
     turkish_upper,
 )
 
@@ -46,6 +47,25 @@ class TestTurkishLower:
 
     def test_non_turkish_letters_lower_normally(self):
         assert turkish_lower("ABC ÇĞÖŞÜ") == "abc çğöşü"
+
+
+class TestTurkishTitle:
+    def test_dotless_lowercase_i_titlecases_to_dotless_capital(self):
+        # "ışık" must titlecase to "Işık" (dotless I), not "İşık".
+        assert turkish_title("ışık") == "Işık"
+
+    def test_dotted_lowercase_i_titlecases_to_dotted_capital(self):
+        assert turkish_title("istanbul") == "İstanbul"
+
+    def test_rest_is_lowercased(self):
+        assert turkish_title("ANKARA") == "Ankara"
+
+    def test_empty_string(self):
+        assert turkish_title("") == ""
+
+    def test_round_trips_with_lower(self):
+        # title(lower(Titlecased)) == Titlecased for a normal capitalized word.
+        assert turkish_title(turkish_lower("Ankara")) == "Ankara"
 
 
 class TestTurkishUpper:
