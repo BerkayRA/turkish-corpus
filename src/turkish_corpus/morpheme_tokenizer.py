@@ -222,6 +222,11 @@ class MorphemeTokenizer:
         }
         # First byte-char-token id; byte value v -> id (byte_offset + v). Stored to decode runs.
         self._byte_offset: int = piece_to_id[(_BYTE_TAG, 0)]
+        # First MORPHEME-piece id: everything in [byte_offset, _morph_id_start) is byte content
+        # (256 byte-chars then the byte-BPE merge pieces); ids >= it are morpheme pieces. Decode
+        # classifies tokens by this boundary so byte-BPE'd OOV pieces can be interleaved inside a
+        # morpheme word (the piece-level fallback) without a per-word morpheme-vs-byte mode.
+        self._morph_id_start: int = self._byte_offset + _N_BYTES + len(self._byte_merges)
 
         # The GPT-2 byte<->unicode maps (byte-char -> id is via piece_to_id sentinel keys).
         self._byte_to_unicode = bytes_to_unicode()
@@ -358,38 +363,56 @@ class MorphemeTokenizer:
         return ids
 
     def _encode_word(self, word: str) -> list[int]:
-        """Ids for a single surface word (morpheme path with casing marker, else byte-BPE)."""
+        """Ids for a single surface word: PIECE-LEVEL morpheme path with casing marker, else
+        byte-BPE.
+
+        The word is morpheme-segmented (lowercased) and, as long as the pieces rejoin to the
+        lowercased surface, encoded piece by piece: each in-vocab piece stays a morpheme token,
+        each OOV piece is byte-BPE'd *in place*. So a single rare stem no longer forces the whole
+        word (suffix chain included) onto the expensive byte path — only the rare piece pays.
+        Casing is carried by the marker and reapplied on decode. MIXED case, junk-length, or a
+        non-reconstructing segmentation fall back to byte-BPE of the ORIGINAL surface (exact case
+        + punctuation preserved), which guarantees ``decode(encode(x)) == x``.
+        """
         lowered = turkish_lower(word)
         marker = self._casing_marker(word, lowered)
 
-        # MIXED case, or junk-length: no clean morpheme path -> byte-BPE the original surface.
         if marker is not False and len(word) <= MAX_WORD_LEN:
             pieces = self._word_pieces(lowered)
-            morph_ids = self._try_morpheme_ids(pieces, lowered)
-            if morph_ids is not None:
+            # Reconstruction fidelity: pieces must rejoin to the lowered surface (no dropped
+            # characters, e.g. an apostrophe). Only then is the lowered form recoverable from the
+            # piece stream + marker; otherwise use the original-surface byte path below.
+            if pieces and "".join(pieces) == lowered:
                 prefix = [] if marker is None else [marker]
-                return prefix + morph_ids
+                return prefix + self._encode_pieces(pieces)
 
         # Fallback: byte-BPE on the ORIGINAL surface (preserves exact case + punctuation).
         return [self._special_ids["WORD_BOUNDARY"], *self._byte_bpe_encode(word)]
 
-    def _try_morpheme_ids(self, pieces: list[str], lowered: str) -> list[int] | None:
-        """Morpheme ids for ``pieces`` if they pass the fidelity check, else ``None``.
+    def _encode_pieces(self, pieces: list[str]) -> list[int]:
+        """Encode lowered morpheme ``pieces``, byte-BPE'ing only the OOV ones (piece-level).
 
-        Fidelity: the pieces must concatenate back to the lowercased form (no dropped
-        characters — e.g. an apostrophe) AND every fused piece must be in the morpheme vocab
-        (no OOV). Either failure returns ``None`` so the caller uses the byte-BPE fallback,
-        which is what guarantees losslessness.
+        The first piece is fused with ``morph_sep`` (``▁p0``); subsequent pieces are bare. An
+        in-vocab piece emits its morpheme id; an OOV piece is byte-BPE'd (byte-char / byte-BPE
+        ids, all below the morpheme range). The word's start is always signalled by either a
+        ``▁``-piece or a ``WORD_BOUNDARY`` — so when the FIRST piece is OOV (no ``▁`` token to
+        open the word) a ``WORD_BOUNDARY`` is emitted first. Decode appends every following bare
+        morpheme piece / byte run to that same open word, in order.
         """
-        if not pieces or "".join(pieces) != lowered:
-            return None
-        fused = [self.morph_sep + pieces[0], *pieces[1:]]
         ids: list[int] = []
-        for piece in fused:
-            piece_id = self.piece_to_id.get(piece)
-            if piece_id is None:
-                return None
-            ids.append(piece_id)
+        started = False  # has a word-start signal (▁-piece or WORD_BOUNDARY) been emitted yet?
+        for index, piece in enumerate(pieces):
+            token = self.morph_sep + piece if index == 0 else piece
+            piece_id = self.piece_to_id.get(token)
+            if piece_id is not None:
+                ids.append(piece_id)
+                started = True
+                continue
+            if not started:
+                # First piece is OOV: open the (byte-initial) word so decode flushes the previous.
+                ids.append(self._special_ids["WORD_BOUNDARY"])
+                started = True
+            ids.extend(self._byte_bpe_encode(piece))
         return ids
 
     def _byte_bpe_encode(self, surface: str) -> list[int]:
@@ -416,44 +439,65 @@ class MorphemeTokenizer:
     def decode(self, ids: list[int]) -> str:
         """Decode ids back to surface text, the exact inverse of :meth:`encode`.
 
-        PAD / BOS / EOS / UNK are dropped. ``CAP`` / ``UPPER`` set a pending case applied to the
-        NEXT morpheme word when it flushes. A ``MORPH_SEP``-prefixed piece starts a new morpheme
-        word (``▁`` stripped; pending case applied + cleared on flush); bare morpheme pieces
-        concatenate onto the current morpheme word. ``WORD_BOUNDARY`` starts a new byte-BPE
-        word; following byte-char / byte-BPE pieces accumulate as byte-chars, then map back to
-        bytes and decode UTF-8 (``errors="replace"``). Words join with single spaces.
+        Tokens are classified by id RANGE (not by a per-word mode), which is what lets a word mix
+        morpheme pieces and byte-BPE'd OOV pieces (the piece-level fallback):
+
+        * PAD / BOS / EOS / UNK -> dropped.
+        * ``CAP`` / ``UPPER`` -> flush the open word, then set a pending case for the NEXT word.
+        * ``WORD_BOUNDARY`` -> flush, open a new word (used to start a word whose first piece is
+          byte-BPE'd; any pending case from a marker survives and is applied at the next flush).
+        * id in ``[byte_offset, _morph_id_start)`` -> byte content (a byte-char, or a byte-BPE
+          merge piece = a string of byte-chars): buffered and UTF-8 decoded (``errors="replace"``)
+          in order within the current word.
+        * ``▁``-prefixed morpheme piece -> flush, open a new morpheme word.
+        * bare morpheme piece -> appended to the current word (after draining any buffered bytes).
+
+        Every word starts with a ``▁``-piece or a ``WORD_BOUNDARY`` (optionally preceded by a
+        case marker), so bare pieces / byte runs always continue the open word. Words join with
+        single spaces.
         """
         words: list[str] = []
-        morph_word: list[str] | None = None  # accumulating morpheme pieces, or None
-        byte_chars: list[str] | None = None  # accumulating byte-chars, or None
-        pending_case: str | None = None  # "CAP" / "UPPER" for the next morpheme word
+        parts: list[str] | None = None  # ordered decoded fragments of the open word, or None
+        pending: list[str] | None = None  # buffered byte-chars awaiting UTF-8 decode, or None
+        pending_case: str | None = None  # "CAP" / "UPPER" for the next word
 
-        byte_end = self._byte_offset + _N_BYTES
+        morph_start = self._morph_id_start
+        byte_lo = self._byte_offset
+        byte_char_end = byte_lo + _N_BYTES
         drop = {self._special_ids[name] for name in ("PAD", "BOS", "EOS", "UNK")}
         wb = self._special_ids["WORD_BOUNDARY"]
         cap = self._special_ids["CAP"]
         upper = self._special_ids["UPPER"]
 
-        def flush() -> None:
-            """Emit the in-progress word (if any), applying + clearing any pending case.
+        def drain_bytes() -> None:
+            """UTF-8 decode any buffered byte-chars into the open word's parts, preserving order."""
+            nonlocal parts, pending
+            if pending:
+                raw = bytes(self._unicode_to_byte[c] for c in pending)
+                if parts is None:
+                    parts = []
+                parts.append(raw.decode("utf-8", errors="replace"))
+            pending = None
 
-            ``pending_case`` is cleared ONLY when a morpheme word is actually emitted, so a
-            marker set just before a ``▁`` piece survives the flush that opens the new word.
+        def flush() -> None:
+            """Emit the open word (if any), applying + clearing any pending case.
+
+            Early-returns when no word is open, so a case marker set just before a ``▁`` piece /
+            ``WORD_BOUNDARY`` survives the flush that opens the new word.
             """
-            nonlocal morph_word, byte_chars, pending_case
-            if morph_word is not None:
-                word = "".join(morph_word)
+            nonlocal parts, pending, pending_case
+            if parts is None and pending is None:
+                return
+            drain_bytes()
+            if parts:
+                word = "".join(parts)
                 if pending_case == "CAP":
                     word = turkish_title(word)
                 elif pending_case == "UPPER":
                     word = turkish_upper(word)
                 words.append(word)
-                morph_word = None
-                pending_case = None
-            elif byte_chars is not None:
-                raw = bytes(self._unicode_to_byte[c] for c in byte_chars)
-                words.append(raw.decode("utf-8", errors="replace"))
-                byte_chars = None
+            parts = None
+            pending_case = None
 
         for tid in ids:
             if tid in drop:
@@ -468,39 +512,42 @@ class MorphemeTokenizer:
                 continue
             if tid == wb:
                 flush()
-                pending_case = None  # byte-BPE words carry their own case; drop any stray marker
-                byte_chars = []  # a byte-BPE word begins
+                parts = []  # open a new word (its first content is byte-BPE)
+                pending = None
                 continue
 
-            # A byte-char token: part of the current byte-BPE word.
-            if self._byte_offset <= tid < byte_end:
-                if byte_chars is None:  # defensive: byte-char without a WORD_BOUNDARY
-                    flush()
-                    byte_chars = []
-                byte_chars.append(self._byte_to_unicode[tid - self._byte_offset])
+            # Byte content: a byte-char, or a byte-BPE merge piece (a string of byte-chars). Both
+            # live below the morpheme range; buffer them for ordered UTF-8 decoding.
+            if byte_lo <= tid < morph_start:
+                if parts is None and pending is None:
+                    parts = []  # defensive: byte content without an opening boundary
+                if pending is None:
+                    pending = []
+                if tid < byte_char_end:
+                    pending.append(self._byte_to_unicode[tid - byte_lo])
+                else:
+                    merge_piece = self.id_to_piece[tid]
+                    if isinstance(merge_piece, str):
+                        pending.extend(merge_piece)
                 continue
 
             piece = self.id_to_piece[tid] if 0 <= tid < len(self.id_to_piece) else None
             if not isinstance(piece, str):
                 continue
 
-            # A ``▁``-prefixed piece is ALWAYS a word-initial morpheme piece: byte-BPE pieces
-            # are GPT-2 byte-chars and can never contain ``▁`` (U+2581), so this reliably ends
-            # any byte-BPE word in progress and opens a new morpheme word.
+            # A ``▁``-prefixed piece is ALWAYS word-initial: it ends the open word and starts a
+            # new morpheme word.
             if piece.startswith(self.morph_sep):
                 flush()
-                morph_word = [piece[len(self.morph_sep) :]]
+                parts = [piece[len(self.morph_sep) :]]
+                pending = None
                 continue
 
-            if byte_chars is not None:
-                # Inside a byte-BPE word: a bare str piece is a byte-BPE merge piece (byte-chars).
-                byte_chars.extend(piece)
-                continue
-
-            # A bare morpheme piece continues the current morpheme word.
-            if morph_word is None:
-                morph_word = []
-            morph_word.append(piece)
+            # A bare morpheme piece continues the open word; drain buffered bytes first (order!).
+            drain_bytes()
+            if parts is None:
+                parts = []
+            parts.append(piece)
 
         flush()
         return " ".join(words)

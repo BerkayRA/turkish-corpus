@@ -463,17 +463,48 @@ class TestFidelityCheck:
         assert ids[0] == wb  # fidelity check failed -> byte-BPE fallback
         assert tok.decode(ids) == "abcd"
 
-    def test_oov_piece_routes_to_byte_bpe(self, tmp_path, monkeypatch):
-        # Pieces concatenate back, but an internal piece is OOV -> byte-BPE the whole surface.
+    def test_oov_internal_piece_byte_bpe_piece_level(self, tmp_path, monkeypatch):
+        # Pieces rejoin, internal piece OOV -> PIECE-LEVEL fallback: keep the in-vocab pieces as
+        # morphemes and byte-BPE ONLY the OOV piece (not the whole surface). Lossless round-trip.
         analyses = {
             "evxx": {"parsed": True, "morphemes": [{"chunk": "ev"}, {"chunk": "xx"}]},
         }
         _install_fake_tr_api(monkeypatch, analyses=analyses)
         tok = _build(tmp_path)
-        wb = tok.piece_to_id[("<special>", "WORD_BOUNDARY")]
         ids = tok.encode("evxx")
-        assert ids[0] == wb
+        # First token is the in-vocab fused first piece ▁ev (a morpheme id), NOT WORD_BOUNDARY.
+        assert ids[0] == tok.piece_to_id[MORPH_SEP + "ev"]
+        assert ids[0] >= tok._morph_id_start
+        # The OOV "xx" is byte content (below the morpheme range), not a whole-word fallback.
+        assert ids[1:] and all(t < tok._morph_id_start for t in ids[1:])
         assert tok.decode(ids) == "evxx"
+
+    def test_oov_first_piece_opens_with_word_boundary(self, tmp_path, monkeypatch):
+        # First piece OOV (no ▁-token to open the word) -> WORD_BOUNDARY then byte-BPE, while the
+        # in-vocab suffix is still kept as a morpheme piece. Lossless.
+        analyses = {
+            "xxler": {"parsed": True, "morphemes": [{"chunk": "xx"}, {"chunk": "ler"}]},
+        }
+        _install_fake_tr_api(monkeypatch, analyses=analyses)
+        tok = _build(tmp_path)
+        wb = tok.piece_to_id[("<special>", "WORD_BOUNDARY")]
+        ids = tok.encode("xxler")
+        assert ids[0] == wb
+        assert tok.piece_to_id["ler"] in ids  # suffix kept as a morpheme, not byte-BPE'd
+        assert tok.decode(ids) == "xxler"
+
+    def test_piece_level_interleave_roundtrip_with_casing(self, tmp_path, monkeypatch):
+        # in-vocab / OOV / in-vocab interleaving must round-trip exactly, including CAP / UPPER.
+        analyses = {
+            "evxxler": {
+                "parsed": True,
+                "morphemes": [{"chunk": "ev"}, {"chunk": "xx"}, {"chunk": "ler"}],
+            },
+        }
+        _install_fake_tr_api(monkeypatch, analyses=analyses)
+        tok = _build(tmp_path)
+        for surface in ("evxxler", "Evxxler", "EVXXLER"):
+            assert tok.decode(tok.encode(surface)) == surface
 
 
 # ---------------------------------------------------------------------------------------------
