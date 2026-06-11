@@ -11,6 +11,7 @@ multiprocessing are needed. A real-``tr_api`` smoke test is guarded by a skip, a
 from __future__ import annotations
 
 import os
+import signal
 import sys
 import time
 import types
@@ -111,6 +112,27 @@ class TestSegmentWordHardening:
         assert segment_word("ev", tok) == "ev"
         # If the timer leaked, this sleep would raise _SegTimeout; it must complete cleanly.
         time.sleep(0.05)
+
+    def test_handler_is_noop_when_disarmed(self):
+        # Regression: the SIGALRM that fired during the finally's setitimer(0) disarm used to
+        # escape uncaught and kill the whole multiprocessing pool. The armed-flag guard makes a
+        # stray/late delivery a no-op. After a normal call the flag is cleared, so invoking the
+        # handler directly (simulating that late delivery) must NOT raise.
+        import turkish_corpus.morph_segment as ms
+
+        segment_word("ev", _FakeTokenizer())
+        assert ms._alarm_armed is False
+        ms._on_alarm(signal.SIGALRM, None)  # must return cleanly, not raise _SegTimeout
+
+    def test_handler_raises_only_while_armed(self):
+        import turkish_corpus.morph_segment as ms
+
+        ms._alarm_armed = True
+        try:
+            with pytest.raises(ms._SegTimeout):
+                ms._on_alarm(signal.SIGALRM, None)
+        finally:
+            ms._alarm_armed = False
 
 
 class TestSegmentLine:

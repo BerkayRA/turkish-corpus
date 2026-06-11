@@ -75,9 +75,21 @@ class _SegTimeout(Exception):
     """Raised from the SIGALRM handler to abandon a single pathological word analysis."""
 
 
+# Only raise from the handler while a word is *actively* being analysed. Cleared before the
+# timer is disarmed, so a signal delivered during/after disarm (a classic SIGALRM race) becomes
+# a no-op instead of escaping uncaught and killing the worker. Per-process global; workers are
+# single-threaded so no lock is needed.
+_alarm_armed = False
+
+
 def _on_alarm(signum: int, frame: Any) -> None:  # noqa: ARG001 (signal handler signature)
-    """SIGALRM handler: convert the timer expiry into a catchable per-word timeout."""
-    raise _SegTimeout
+    """SIGALRM handler: convert the timer expiry into a catchable per-word timeout.
+
+    Guarded by :data:`_alarm_armed` so a late/stray delivery (e.g. the timer firing during the
+    ``finally`` disarm, after we have already left the analysis) is ignored rather than raised.
+    """
+    if _alarm_armed:
+        raise _SegTimeout
 
 
 _alarm_installed = False
@@ -138,7 +150,9 @@ def segment_word(
         # Junk / URL: do not feed the chart parser. One opaque token.
         return word
 
+    global _alarm_armed
     install_alarm_handler()  # lazy: makes the in-process / single-worker path hang-proof.
+    _alarm_armed = True
     signal.setitimer(signal.ITIMER_REAL, timeout)
     try:
         result = tokenizer.tokenize(
@@ -159,8 +173,10 @@ def segment_word(
         # single bad word can never hang or crash the whole batch.
         return word
     finally:
-        # ALWAYS disarm, even on the happy path, so a pending timer never fires on the next
-        # word (or on unrelated main-process code in the single-worker case).
+        # Disarm the handler FIRST (so a timer firing during the setitimer(0) call below is a
+        # no-op, not an uncaught _SegTimeout escaping the finally), then ALWAYS stop the timer
+        # so a pending expiry never fires on the next word / unrelated main-process code.
+        _alarm_armed = False
         signal.setitimer(signal.ITIMER_REAL, 0)
 
 
