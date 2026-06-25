@@ -126,3 +126,18 @@ uv run ruff check src tests
 The datatrove-dependent code is covered by tests marked `pipeline` (run after
 `uv sync --extra pipeline`). License: Apache-2.0 (code). Corpus license follows the source
 data — HPLT v2 is CC0.
+
+## Project family
+
+**You are here: `turkish-corpus`** — the data pipeline in a four-repository effort to
+build a Turkish LLM from the data up:
+
+| Repo | Role |
+|------|------|
+| [turkish-tokenizer](https://github.com/BerkayRA/turkish-tokenizer) | Zero-dependency Turkish morphological analyzer + fertility metric |
+| [turkish-llm](https://github.com/BerkayRA/turkish-llm) | Tokenizer training/eval lab + from-scratch model architecture spec |
+| **turkish-corpus** (this repo) | HPLT-anchored corpus pipeline (clean → dedup → blend); produces the token-counted corpus |
+| [turkish-llm-demo](https://github.com/BerkayRA/turkish-llm-demo) | End-to-end on-prem demo: live training, Turkish chatbot, tokenizer visualizer, executive dashboard |
+
+Pipeline: **turkish-tokenizer → turkish-llm → turkish-corpus → turkish-llm-demo**. The
+corpus produced here is what `turkish-llm-demo` memmaps and trains its from-scratch model on.
